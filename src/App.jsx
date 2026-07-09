@@ -6,6 +6,10 @@ export default function App() {
   const [voiceEnabled, setVoiceEnabled] = useState(true)
   const [running, setRunning] = useState(true)
   
+  // States for the Dedicated Weather Box
+  const [weatherLoading, setWeatherLoading] = useState(false)
+  const [weatherReport, setWeatherReport] = useState("Standby for environmental telemetry. Awaiting manual scan initiation...")
+  
   const [lastUpdate, setLastUpdate] = useState(null)
   const [fps, setFps] = useState(0)
   
@@ -25,6 +29,22 @@ export default function App() {
 
   const BACKEND = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000'
 
+  const triggerSpeech = (text, speed = 1.0) => {
+    if (!voiceEnabledRef.current) return;
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.rate = speed;
+    const availableVoices = window.speechSynthesis.getVoices();
+    if (availableVoices.length > 0) {
+      const localVoice = availableVoices.find(v => v.localService) || availableVoices[0];
+      utterance.voice = localVoice;
+    }
+    window.speechSynthesis.speak(utterance);
+  }
+
+  useEffect(() => {
+    window.speechSynthesis.onvoiceschanged = () => { window.speechSynthesis.getVoices() };
+  }, []);
+
   useEffect(() => {
     const wsProto = BACKEND.startsWith('https') ? 'wss' : 'ws'
     const wsHost = BACKEND.replace(/^https?:/, '')
@@ -35,17 +55,15 @@ export default function App() {
       wsRef.current = ws
       
       ws.onmessage = (ev) => {
+        // GHOST CONNECTION KILLER: Forces React to ignore older out-of-sync websockets
+        if (ws !== wsRef.current) return;
+
         msgCountRef.current += 1
         try {
           const data = JSON.parse(ev.data)
           
-          if (!voiceEnabledRef.current) {
-            window.speechSynthesis.cancel()
-          }
-
           if (runningRef.current) {
             const liveObjects = data.objects || []
-            
             setObjects(liveObjects)
             
             if (data.description && data.description !== aiDescRef.current) {
@@ -56,19 +74,14 @@ export default function App() {
               const now = Date.now()
               liveObjects.forEach((obj) => {
                 const lastSpoken = spokenObjectsCooldownRef.current[obj.name] || 0
-                
                 if (!lastSpoken || (now - lastSpoken > 5000)) {
                   spokenObjectsCooldownRef.current[obj.name] = now
-                  
                   const phrase = `${obj.name}, ${obj.steps_away} steps away on your ${obj.position}.`
-                  const utterance = new SpeechSynthesisUtterance(phrase)
-                  utterance.rate = 1.15
-                  window.speechSynthesis.speak(utterance)
+                  triggerSpeech(phrase, 1.15)
                 }
               })
             }
           } else {
-            // When paused, force clear the bounding box list on the frontend visually
             setObjects([])
           }
           setLastUpdate(new Date().toLocaleTimeString())
@@ -77,9 +90,7 @@ export default function App() {
         }
       }
       ws.onerror = (e) => console.error('WS error', e)
-      ws.onclose = () => {
-        setTimeout(connect, 1000)
-      }
+      ws.onclose = () => { setTimeout(connect, 1000) }
     }
 
     connect()
@@ -98,11 +109,49 @@ export default function App() {
   useEffect(() => {
     if (running && voiceEnabled && aiDescription) {
       window.speechSynthesis.cancel() 
-      const utterance = new SpeechSynthesisUtterance(aiDescription)
-      utterance.rate = 1.1
-      window.speechSynthesis.speak(utterance)
+      triggerSpeech(aiDescription, 1.1)
     }
   }, [aiDescription, voiceEnabled, running])
+
+  function fetchWeatherFeedback() {
+    if (weatherLoading) return
+    setWeatherLoading(true)
+    setWeatherReport("Accessing weather data satellites...")
+    
+    window.speechSynthesis.cancel()
+    triggerSpeech("Accessing weather data.", 1.1)
+
+    if (!navigator.geolocation) {
+      setWeatherReport("Location features are unavailable on this device browser.")
+      triggerSpeech("Location features are unavailable.", 1.1)
+      setWeatherLoading(false)
+      return
+    }
+
+    navigator.geolocation.getCurrentPosition(
+      async (position) => {
+        try {
+          const res = await fetch(`${BACKEND}/api/weather?lat=${position.coords.latitude}&lon=${position.coords.longitude}`)
+          const data = await res.json()
+          
+          setWeatherReport(data.report)
+          window.speechSynthesis.cancel()
+          triggerSpeech(data.report, 1.1)
+          
+        } catch (err) {
+          setWeatherReport("Unable to pull telemetry data. Backend connection failed.")
+          triggerSpeech("Unable to pull telemetry data.", 1.1)
+        } finally {
+          setWeatherLoading(false)
+        }
+      },
+      () => {
+        setWeatherReport("Location tracking permission was denied by the user.")
+        triggerSpeech("Location tracking permission denied.", 1.1)
+        setWeatherLoading(false)
+      }
+    )
+  }
 
   function snapshot() {
     const img = imgRef.current
@@ -205,9 +254,9 @@ export default function App() {
 
       <main style={{ display: 'grid', gridTemplateColumns: '1fr 420px', gap: '2rem', alignItems: 'start' }}>
         
+        {/* LEFT COLUMN: Camera and AI Descriptions */}
         <section style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
           
-          {/* DYNAMIC CAMERA RENDER BLOCK */}
           <div style={{ position: 'relative', width: '100%', aspectRatio: '16/9', background: '#000000', borderRadius: '18px', overflow: 'hidden', border: '2px solid #1f2937', boxShadow: '0 25px 50px -12px rgba(0,0,0,0.7)' }}>
             
             {running ? (
@@ -254,77 +303,129 @@ export default function App() {
           </div>
         </section>
 
-        <aside style={{ background: '#0b0f19', padding: '1.7rem', borderRadius: '18px', border: '1px solid #1f2937', boxShadow: '0 20px 40px rgba(0,0,0,0.6)' }}>
-          <div style={{ borderBottom: '1px solid #1f2937', paddingBottom: '1rem', marginBottom: '1.5rem' }}>
-            <h2 style={{ fontSize: '1.4rem', fontWeight: '800', letterSpacing: '-0.02em' }}>Realtime Tracked Targets</h2>
-            <div style={{ color: '#6b7280', fontSize: '0.85rem', marginTop: '2px', fontFamily: 'monospace' }}>TELEMETRY LAYER STATUS: {running ? 'SYNCHRONIZED' : 'OFFLINE'}</div>
-          </div>
+        {/* RIGHT COLUMN: Target List and Weather Box */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
           
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', minHeight: '350px' }}>
-            {objects.length === 0 && (
-              <div style={{ color: '#4b5563', textAlign: 'center', padding: '4rem 0', fontFamily: 'monospace', fontSize: '0.9rem', border: '1px dashed #1f2937', borderRadius: '12px' }}>
-                [ VACANT VIEWPORT FIELD ]<br/>No immediate objects registered.
-              </div>
-            )}
+          {/* Box 1: YOLO Targets */}
+          <aside style={{ background: '#0b0f19', padding: '1.7rem', borderRadius: '18px', border: '1px solid #1f2937', boxShadow: '0 20px 40px rgba(0,0,0,0.6)' }}>
+            <div style={{ borderBottom: '1px solid #1f2937', paddingBottom: '1rem', marginBottom: '1.5rem' }}>
+              <h2 style={{ fontSize: '1.4rem', fontWeight: '800', letterSpacing: '-0.02em' }}>Realtime Tracked Targets</h2>
+              <div style={{ color: '#6b7280', fontSize: '0.85rem', marginTop: '2px', fontFamily: 'monospace' }}>TELEMETRY LAYER STATUS: {running ? 'SYNCHRONIZED' : 'OFFLINE'}</div>
+            </div>
             
-            {objects.map((o, i) => (
-              <div 
-                key={`${o.name}-${i}`}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '16px',
-                  background: '#111827',
-                  padding: '1.2rem',
-                  borderRadius: '14px',
-                  border: '1px solid #374151',
-                  animation: 'fadeIn 0.2s ease-out'
-                }}
-              >
-                <div style={{ 
-                  background: o.position === 'center' ? '#0284c7' : o.position === 'left' ? '#b45309' : '#6d28d9', 
-                  color: '#ffffff', 
-                  fontWeight: '800', 
-                  padding: '10px', 
-                  borderRadius: '10px', 
-                  fontSize: '0.9rem', 
-                  width: '42px', 
-                  textAlign: 'center',
-                  fontFamily: 'monospace'
-                }}>
-                  {(o.position || 'ce').slice(0, 2).toUpperCase()}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', minHeight: '350px', maxHeight: '400px', overflowY: 'auto' }}>
+              {objects.length === 0 && (
+                <div style={{ color: '#4b5563', textAlign: 'center', padding: '4rem 0', fontFamily: 'monospace', fontSize: '0.9rem', border: '1px dashed #1f2937', borderRadius: '12px' }}>
+                  [ VACANT VIEWPORT FIELD ]<br/>No immediate objects registered.
                 </div>
-                
-                <div style={{ flex: 1 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <div style={{ fontWeight: '700', fontSize: '1.2rem', color: '#ffffff', textTransform: 'capitalize' }}>
-                      {o.name}
-                    </div>
-                    <span style={{ fontSize: '0.75rem', background: '#030712', padding: '3px 10px', borderRadius: '6px', color: '#9ca3af', fontWeight: '700', textTransform: 'uppercase', fontFamily: 'monospace', border: '1px solid #1f2937' }}>
-                      {o.position} axis
-                    </span>
+              )}
+              
+              {objects.map((o, i) => (
+                <div 
+                  key={`${o.name}-${i}`}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '16px',
+                    background: '#111827',
+                    padding: '1.2rem',
+                    borderRadius: '14px',
+                    border: '1px solid #374151',
+                    animation: 'fadeIn 0.2s ease-out'
+                  }}
+                >
+                  <div style={{ 
+                    background: o.position === 'center' ? '#0284c7' : o.position === 'left' ? '#b45309' : '#6d28d9', 
+                    color: '#ffffff', 
+                    fontWeight: '800', 
+                    padding: '10px', 
+                    borderRadius: '10px', 
+                    fontSize: '0.9rem', 
+                    width: '42px', 
+                    textAlign: 'center',
+                    fontFamily: 'monospace'
+                  }}>
+                    {(o.position || 'ce').slice(0, 2).toUpperCase()}
                   </div>
                   
-                  <div style={{ marginTop: '6px', fontSize: '0.95rem', color: '#e5e7eb', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                    <span>⚡ RANGE:</span>
-                    <span style={{ color: '#f59e0b', fontWeight: '800', background: '#78350f', padding: '1px 8px', borderRadius: '4px', fontSize: '0.85rem' }}>
-                      {o.steps_away} STEPS AWAY
-                    </span>
-                  </div>
-
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '10px' }}>
-                    <div style={{ flex: 1, height: '5px', background: '#1f2937', borderRadius: '3px', overflow: 'hidden' }}>
-                      <div style={{ height: '100%', background: '#10b981', width: `${Math.min(100, (o.confidence || 0) * 100)}%` }} />
+                  <div style={{ flex: 1 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <div style={{ fontWeight: '700', fontSize: '1.2rem', color: '#ffffff', textTransform: 'capitalize' }}>
+                        {o.name}
+                      </div>
+                      <span style={{ fontSize: '0.75rem', background: '#030712', padding: '3px 10px', borderRadius: '6px', color: '#9ca3af', fontWeight: '700', textTransform: 'uppercase', fontFamily: 'monospace', border: '1px solid #1f2937' }}>
+                        {o.position} axis
+                      </span>
                     </div>
-                    <div style={{ fontSize: '0.8rem', color: '#9ca3af', fontFamily: 'monospace', width: '35px', textAlign: 'right' }}>
-                      {Math.round((o.confidence || 0) * 100)}%
+                    
+                    <div style={{ marginTop: '6px', fontSize: '0.95rem', color: '#e5e7eb', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <span>⚡ RANGE:</span>
+                      <span style={{ color: '#f59e0b', fontWeight: '800', background: '#78350f', padding: '1px 8px', borderRadius: '4px', fontSize: '0.85rem' }}>
+                        {o.steps_away} STEPS AWAY
+                      </span>
+                    </div>
+
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '10px' }}>
+                      <div style={{ flex: 1, height: '5px', background: '#1f2937', borderRadius: '3px', overflow: 'hidden' }}>
+                        <div style={{ height: '100%', background: '#10b981', width: `${Math.min(100, (o.confidence || 0) * 100)}%` }} />
+                      </div>
+                      <div style={{ fontSize: '0.8rem', color: '#9ca3af', fontFamily: 'monospace', width: '35px', textAlign: 'right' }}>
+                        {Math.round((o.confidence || 0) * 100)}%
+                      </div>
                     </div>
                   </div>
                 </div>
+              ))}
+            </div>
+          </aside>
+
+          {/* Box 2: Spatial Weather Telemetry Box */}
+          <aside style={{ background: '#0b0f19', padding: '1.7rem', borderRadius: '18px', border: '1px solid #1f2937', boxShadow: '0 20px 40px rgba(0,0,0,0.6)' }}>
+            <div style={{ borderBottom: '1px solid #1f2937', paddingBottom: '1rem', marginBottom: '1.5rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div>
+                <h2 style={{ fontSize: '1.4rem', fontWeight: '800', letterSpacing: '-0.02em' }}>Spatial Weather</h2>
+                <div style={{ color: '#6b7280', fontSize: '0.85rem', marginTop: '2px', fontFamily: 'monospace' }}>MACRO ENVIRONMENT DATA</div>
               </div>
-            ))}
-          </div>
-        </aside>
+              <button
+                onClick={fetchWeatherFeedback}
+                disabled={weatherLoading}
+                style={{
+                  background: weatherLoading ? '#1e3a8a' : '#0284c7',
+                  border: 'none',
+                  color: '#fff',
+                  fontWeight: '700',
+                  padding: '0.5rem 1rem',
+                  borderRadius: '8px',
+                  cursor: weatherLoading ? 'not-allowed' : 'pointer',
+                  boxShadow: weatherLoading ? 'none' : '0 0 10px rgba(2, 132, 199, 0.4)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  fontSize: '0.9rem'
+                }}
+              >
+                {weatherLoading ? 'SCANNING...' : '🌦 FETCH DATA'}
+              </button>
+            </div>
+
+            <div style={{ 
+              background: '#111827', 
+              padding: '1.2rem', 
+              borderRadius: '14px', 
+              border: '1px solid #374151', 
+              color: weatherReport.includes("Standby") ? '#6b7280' : '#e5e7eb',
+              fontFamily: 'monospace',
+              fontSize: '0.95rem',
+              lineHeight: '1.5',
+              minHeight: '80px',
+              display: 'flex',
+              alignItems: 'center'
+            }}>
+              {weatherReport}
+            </div>
+          </aside>
+
+        </div>
       </main>
     </div>
   )
