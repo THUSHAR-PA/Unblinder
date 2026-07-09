@@ -85,5 +85,3 @@ npm install
 npm run dev
 Description: Accesses the node client stack directory, updates compilation packages, and maps your console system interface locally onto port 5173 without layout errors.
 
-
-GROQ_API_KEY=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

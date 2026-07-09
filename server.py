@@ -9,6 +9,10 @@ from fastapi.responses import StreamingResponse
 from ultralytics import YOLO
 import cv2
 from groq import Groq
+from dotenv import load_dotenv
+
+# Initialize and inject configurations from your local .env file securely
+load_dotenv()
 
 app = FastAPI()
 app.add_middleware(
@@ -18,18 +22,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# =====================================================================
-# 🚨 HACKATHON CONFIGURATION: PASTE YOUR GROQ API KEY DIRECTLY HERE
-# =====================================================================
-GROQ_API_KEY = "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"
-# =====================================================================
-
-groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY and not GROQ_API_KEY.startswith("gsk_YOUR") else None
+# Pull the token directly from the local environment dictionary matrix
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
 if not groq_client:
-    print("⚠️ WARNING: GROQ_API_KEY is not configured yet. Fallback descriptions will be active.")
+    print("⚠️ WARNING: GROQ_API_KEY could not be mapped out from your local .env configuration environment.")
 
-# Globals shared between capture thread and request handlers
+# Global state metrics shared across threaded processes
 latest_frame = None
 latest_objects = []
 latest_stats = {"inference_ms": 0.0, "fps": 0.0}
@@ -41,18 +41,18 @@ capture_running.set()
 def capture_loop(source=0, model_path="yolo11n.pt"):
     global latest_frame, latest_objects
     model = YOLO(model_path)
-    cap = None  # Start with no camera bound to hardware
+    cap = None  # Lazy initialize to allow cold hardware shutdowns
     
-    img_w, img_h = 640, 480 # Default fallback dimensions
+    img_w, img_h = 640, 480  # Baseline fallback frame metrics
 
     last_time = time.time()
     frame_count = 0
 
     while True:
-        # 1. HARDWARE POWER MANAGEMENT
+        # 1. HARDWARE MANAGEMENT DEALLOCATION
         if not capture_running.is_set():
             if cap is not None:
-                cap.release() # PHYSICALLY TURN OFF LAPTOP CAMERA LED
+                cap.release()  # PHYSICAL TERMINATION: Kills laptop camera green sensor light cleanly
                 cap = None
             
             with frame_lock:
@@ -62,18 +62,17 @@ def capture_loop(source=0, model_path="yolo11n.pt"):
             time.sleep(0.2)
             continue
 
-        # 2. HARDWARE INITIALIZATION
+        # 2. SEAMLESS RE-INITIALIZATION LOOP LOCK
         if cap is None:
             cap = cv2.VideoCapture(source)
             if not cap.isOpened():
                 time.sleep(0.5)
                 continue
             
-            # Grab resolution metrics upon fresh hardware boot
             img_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) if cap.get(cv2.CAP_PROP_FRAME_WIDTH) else 640
             img_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) if cap.get(cv2.CAP_PROP_FRAME_HEIGHT) else 480
 
-        # 3. FRAME PROCESSING
+        # 3. STREAM READ AND INFERENCE MATCHING
         ret, frame = cap.read()
         if not ret:
             time.sleep(0.1)
@@ -106,6 +105,7 @@ def capture_loop(source=0, model_path="yolo11n.pt"):
                 bx_h = xyxy[3] - xyxy[1]
                 center_x = xyxy[0] + (bx_w / 2)
                 
+                # Spatial quadrant slicing
                 if center_x < img_w / 3:
                     position = "left"
                 elif center_x > 2 * img_w / 3:
@@ -113,6 +113,7 @@ def capture_loop(source=0, model_path="yolo11n.pt"):
                 else:
                     position = "center"
                 
+                # Focal index steps away approximation 
                 height_ratio = bx_h / img_h
                 if height_ratio > 0.7:
                     steps = 2
@@ -205,6 +206,7 @@ async def websocket_endpoint(websocket: WebSocket):
             
             now = time.time()
             
+            # DUAL-FREQUENCY MACRO ENVIRONMENT LOOP (Fires strictly every 10 seconds)
             if now - last_scene_time >= 10.0 or last_scene_time == 0.0:
                 last_scene_time = now
                 unique_items = list(set([obj['name'] for obj in current_objs]))
@@ -228,11 +230,12 @@ async def websocket_endpoint(websocket: WebSocket):
                         )
                         cached_scene_context = completion.choices[0].message.content.strip()
                     else:
-                        cached_scene_context = "API key unconfigured. Realtime tracking active."
+                        cached_scene_context = "Groq configuration unmapped. Active tracker running."
                 except Exception as e:
                     print(f"Groq API Scene Exception Details: {e}")
                     cached_scene_context = "Navigating active environment structure"
 
+            # Push telemetry object vectors instantaneously over the running websocket channel
             await websocket.send_json({
                 "objects": current_objs, 
                 "stats": stats,
