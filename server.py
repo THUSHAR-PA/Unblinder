@@ -1,12 +1,14 @@
 import threading
 import time
 import asyncio
+import os
 from io import BytesIO
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, HTMLResponse
+from fastapi.responses import StreamingResponse
 from ultralytics import YOLO
 import cv2
+from groq import Groq
 
 app = FastAPI()
 app.add_middleware(
@@ -15,6 +17,17 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
+
+# =====================================================================
+# 🚨 HACKATHON CONFIGURATION: PASTE YOUR GROQ API KEY DIRECTLY HERE
+# =====================================================================
+GROQ_API_KEY = "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"
+# =====================================================================
+
+groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY and not GROQ_API_KEY.startswith("gsk_YOUR") else None
+
+if not groq_client:
+    print("⚠️ WARNING: GROQ_API_KEY is not configured yet. Fallback descriptions will be active.")
 
 # Globals shared between capture thread and request handlers
 latest_frame = None
@@ -28,30 +41,51 @@ capture_running.set()
 def capture_loop(source=0, model_path="yolo11n.pt"):
     global latest_frame, latest_objects
     model = YOLO(model_path)
-    cap = cv2.VideoCapture(source)
-    import sys
-    import contextlib
+    cap = None  # Start with no camera bound to hardware
+    
+    img_w, img_h = 640, 480 # Default fallback dimensions
 
-    # simple FPS counter
     last_time = time.time()
     frame_count = 0
 
     while True:
+        # 1. HARDWARE POWER MANAGEMENT
+        if not capture_running.is_set():
+            if cap is not None:
+                cap.release() # PHYSICALLY TURN OFF LAPTOP CAMERA LED
+                cap = None
+            
+            with frame_lock:
+                latest_frame = None
+                latest_objects = []
+                
+            time.sleep(0.2)
+            continue
+
+        # 2. HARDWARE INITIALIZATION
+        if cap is None:
+            cap = cv2.VideoCapture(source)
+            if not cap.isOpened():
+                time.sleep(0.5)
+                continue
+            
+            # Grab resolution metrics upon fresh hardware boot
+            img_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) if cap.get(cv2.CAP_PROP_FRAME_WIDTH) else 640
+            img_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) if cap.get(cv2.CAP_PROP_FRAME_HEIGHT) else 480
+
+        # 3. FRAME PROCESSING
         ret, frame = cap.read()
         if not ret:
             time.sleep(0.1)
             continue
 
-        if not capture_running.is_set():
-            time.sleep(0.1)
-            continue
-
-        # suppress model stdout/stderr to reduce console spam
-        with contextlib.redirect_stdout(open('/dev/null', 'w')):
-            with contextlib.redirect_stderr(open('/dev/null', 'w')):
-                t0 = time.time()
-                results = model(frame)
-                t1 = time.time()
+        import contextlib
+        with open(os.devnull, 'w') as devnull:
+            with contextlib.redirect_stdout(devnull):
+                with contextlib.redirect_stderr(devnull):
+                    t0 = time.time()
+                    results = model(frame)
+                    t1 = time.time()
         inference_ms = (t1 - t0) * 1000.0
 
         try:
@@ -60,18 +94,44 @@ def capture_loop(source=0, model_path="yolo11n.pt"):
             annotated = frame
 
         objects = []
+
         for box in results[0].boxes:
             try:
                 cls = int(box.cls[0])
                 conf = float(box.conf[0])
+                name = model.names[cls]
+                
+                xyxy = box.xyxy[0].tolist()
+                bx_w = xyxy[2] - xyxy[0]
+                bx_h = xyxy[3] - xyxy[1]
+                center_x = xyxy[0] + (bx_w / 2)
+                
+                if center_x < img_w / 3:
+                    position = "left"
+                elif center_x > 2 * img_w / 3:
+                    position = "right"
+                else:
+                    position = "center"
+                
+                height_ratio = bx_h / img_h
+                if height_ratio > 0.7:
+                    steps = 2
+                elif height_ratio > 0.4:
+                    steps = 4
+                elif height_ratio > 0.2:
+                    steps = 8
+                else:
+                    steps = 15
+
                 objects.append({
-                    "name": model.names[cls],
-                    "confidence": round(conf, 2)
+                    "name": name,
+                    "confidence": round(conf, 2),
+                    "position": position,
+                    "steps_away": steps
                 })
             except Exception:
                 continue
 
-        # encode JPEG
         ret2, jpeg = cv2.imencode('.jpg', annotated)
         if not ret2:
             continue
@@ -81,7 +141,6 @@ def capture_loop(source=0, model_path="yolo11n.pt"):
             latest_objects = objects
             latest_stats['inference_ms'] = round(inference_ms, 1)
 
-        # update fps
         frame_count += 1
         now = time.time()
         if now - last_time >= 1.0:
@@ -91,8 +150,7 @@ def capture_loop(source=0, model_path="yolo11n.pt"):
             frame_count = 0
             last_time = now
 
-        # small sleep to avoid pegging CPU
-        time.sleep(0.02)
+        time.sleep(0.01)
 
 
 @app.on_event("startup")
@@ -109,7 +167,6 @@ def mjpeg_generator():
         if frame is None:
             time.sleep(0.05)
             continue
-
         yield b"--%b\r\n" % boundary
         yield b"Content-Type: image/jpeg\r\n\r\n"
         yield frame
@@ -134,69 +191,54 @@ def start_camera():
     return {"status": "running"}
 
 
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections: list[WebSocket] = []
-
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.append(websocket)
-
-    def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
-
-    async def send_json(self, websocket: WebSocket, data):
-        try:
-            await websocket.send_json(data)
-        except Exception:
-            self.disconnect(websocket)
-
-    async def broadcast_json(self, data):
-        for connection in list(self.active_connections):
-            try:
-                await connection.send_json(data)
-            except Exception:
-                self.disconnect(connection)
-
-
-manager = ConnectionManager()
-
-
 @app.websocket('/ws')
 async def websocket_endpoint(websocket: WebSocket):
-    await manager.connect(websocket)
+    await websocket.accept()
+    last_scene_time = 0.0
+    cached_scene_context = "Scanning layout framework..."
+    
     try:
         while True:
-            # send latest objects + stats
             with frame_lock:
-                objs = latest_objects
+                current_objs = latest_objects
                 stats = latest_stats.copy()
-            await manager.send_json(websocket, {"objects": objs, "stats": stats})
-            # wait for ~30 FPS
+            
+            now = time.time()
+            
+            if now - last_scene_time >= 10.0 or last_scene_time == 0.0:
+                last_scene_time = now
+                unique_items = list(set([obj['name'] for obj in current_objs]))
+                items_string = ", ".join(unique_items) if unique_items else "clear space"
+                
+                scene_prompt = (
+                    f"Analyze these environment tokens: {items_string}. "
+                    "In exactly 4 to 7 words, identify the macro environment or room layout. "
+                    "Examples: 'Inside a residential living room', 'Walking down an open city street'. "
+                    "Keep it strictly brief, descriptive, and clean. No formatting or commentary."
+                )
+                
+                try:
+                    if groq_client:
+                        completion = await asyncio.to_thread(
+                            groq_client.chat.completions.create,
+                            messages=[{"role": "user", "content": scene_prompt}],
+                            model="llama-3.1-8b-instant",
+                            temperature=0.2,
+                            max_tokens=25
+                        )
+                        cached_scene_context = completion.choices[0].message.content.strip()
+                    else:
+                        cached_scene_context = "API key unconfigured. Realtime tracking active."
+                except Exception as e:
+                    print(f"Groq API Scene Exception Details: {e}")
+                    cached_scene_context = "Navigating active environment structure"
+
+            await websocket.send_json({
+                "objects": current_objs, 
+                "stats": stats,
+                "description": cached_scene_context
+            })
             await asyncio.sleep(0.03)
+            
     except WebSocketDisconnect:
-        manager.disconnect(websocket)
-
-
-@app.get('/')
-def index():
-   
-    html = """
-    <html>
-      <head>
-        <title>Unblinder Stream</title>
-      </head>
-      <body>
-        <h1>Video</h1>
-        <img src="/video_feed" />
-        <h2>WebSocket objects</h2>
-        <pre id="objs"></pre>
-        <script>
-          const ws = new WebSocket(`ws://${location.host}/ws`);
-          const pre = document.getElementById('objs');
-          ws.onmessage = (ev) => { pre.textContent = JSON.stringify(JSON.parse(ev.data), null, 2); };
-        </script>
-      </body>
-    </html>
-    """
-    return HTMLResponse(content=html)
+        pass
