@@ -56,10 +56,9 @@ FIREWORKS_VLM_MODEL = os.environ.get(
 FIREWORKS_URL = "https://api.fireworks.ai/inference/v1/chat/completions"
 VISION_ENABLED = bool(FIREWORKS_API_KEY)
 
-# Seconds between VLM calls while the camera is streaming. This is the only knob
-# that meaningfully moves cost.
-VLM_INTERVAL_S = float(os.environ.get("VLM_INTERVAL_S", "6"))
-
+# The VLM is only ever called when the user asks — pressing Objects, or asking the
+# assistant a question. There is no background loop, so a camera streaming for an
+# hour with nobody pressing anything costs nothing at all.
 MODEL_PATH = os.environ.get("YOLO_MODEL", "yolo11n.onnx")
 
 # The camera lives in the user's browser, not on this server. Frames arrive over
@@ -75,7 +74,9 @@ latest_frame_at = 0.0
 # which is what the VLM wants anyway. Held so the slow vision loop and the assistant
 # can look at the real image instead of a list of labels.
 latest_frame_jpeg: Optional[bytes] = None
-global_scene_context = "Scanning layout framework..."
+# Only ever written by /api/scene, i.e. when the user presses Objects. Until then it
+# says so, rather than implying an analysis has happened.
+global_scene_context = "Press Objects to describe what is ahead."
 
 
 def _vlm_chat(prompt: str, jpeg: bytes, max_tokens: int = 60,
@@ -159,16 +160,21 @@ def run_detection(frame):
 
 
 # ==========================================
-# SCENE ANALYZER — summarizes whatever the camera is currently looking at
+# SCENE ANALYZER — on demand only. The user presses Objects, we look once.
 # ==========================================
+# Nothing here runs on a loop. An earlier version re-analyzed every few seconds and
+# spoke the result, which meant the app talked over the user continuously and billed
+# a VLM call for scenery nobody had asked about. Now a camera left streaming costs
+# exactly nothing until somebody asks a question.
 VLM_SCENE_PROMPT = (
-    "You are the eyes of a blind pedestrian walking forward. This photo is the path "
-    "directly ahead of them, taken a moment ago.\n"
-    "Say what matters for their next few steps. Prioritise walking hazards an object "
-    "detector cannot label: broken pavement, potholes, steps, kerbs, puddles, wet floor, "
-    "construction barriers, a blocked footpath, a closed crossing.\n"
-    "Reply with ONE sentence, at most 20 words, spoken plain English, second person. "
-    "No markdown, no preamble. If the way ahead is clear, say so."
+    "You are the eyes of a blind person who has just asked what is in front of them. "
+    "This photo is the view directly ahead.\n"
+    "Name what is in their path, nearest and most important first, and say roughly where "
+    "each thing is — ahead, to your left, to your right. Include hazards an object detector "
+    "cannot label: steps, kerbs, broken ground, puddles, barriers. Read out any sign text "
+    "you can see.\n"
+    "At most 3 short sentences, under 45 words. Plain spoken English, second person. "
+    "No markdown, no preamble. If the way is clear, say so."
 )
 
 
@@ -197,48 +203,50 @@ def _scene_from_labels(objects) -> Optional[str]:
         return None
 
 
-def scene_analyzer_loop():
+@app.post("/api/scene")
+def analyze_scene():
+    """One-shot scene analysis. This is the Objects button, and it is the only thing
+    that triggers a scene VLM call — press it and we look, otherwise we don't."""
     global global_scene_context
-    time.sleep(3.0)
-    while True:
-        with state_lock:
-            current_objs = list(latest_objects)
-            frame_jpeg = latest_frame_jpeg
-            idle = (time.time() - latest_frame_at) > 15.0
 
-        # No frames arriving means no camera is streaming; don't burn API calls.
-        if idle or not (VISION_ENABLED or groq_client):
-            time.sleep(5.0)
-            continue
+    with state_lock:
+        objs = list(latest_objects)
+        frame_jpeg = latest_frame_jpeg
+        stale = (time.time() - latest_frame_at) > 5.0
 
-        text = None
-        if VISION_ENABLED and frame_jpeg:
-            try:
-                text = _vlm_chat(VLM_SCENE_PROMPT, frame_jpeg, max_tokens=48)
-            except Exception:
-                text = None  # fall through to labels rather than go silent
+    if frame_jpeg is None or stale:
+        return {"success": False, "message": "No live camera frame."}
 
-        if text is None:
-            text = _scene_from_labels(current_objs)
+    text = None
+    if VISION_ENABLED:
+        try:
+            text = _vlm_chat(VLM_SCENE_PROMPT, frame_jpeg, max_tokens=120)
+        except Exception:
+            text = None  # fall through to labels rather than go silent
 
-        if text:
-            clean_text = text.strip().replace('"', '').replace('*', '').replace('#', '')
-            if clean_text:
-                with state_lock:
-                    global_scene_context = clean_text
+    if text is None:
+        text = _scene_from_labels(objs)
+    if not text:
+        return {"success": False, "message": "Scene analysis unavailable."}
 
-        time.sleep(VLM_INTERVAL_S if VISION_ENABLED else 10.0)
+    clean_text = text.strip().replace('"', '').replace('*', '').replace('#', '')
+    if not clean_text:
+        return {"success": False, "message": "Empty scene analysis."}
+
+    with state_lock:
+        global_scene_context = clean_text
+
+    return {"success": True, "summary": clean_text, "objects": objs}
 
 
 @app.on_event("startup")
-def start_background_tasks():
+def announce_vision_mode():
     # The VLM falls back silently on failure, which is right for a walking aid but
     # makes "is vision actually on?" impossible to answer from behaviour alone.
     if VISION_ENABLED:
-        print(f"[vision] Fireworks VLM enabled: {FIREWORKS_VLM_MODEL}, every {VLM_INTERVAL_S:g}s")
+        print(f"[vision] Fireworks VLM enabled: {FIREWORKS_VLM_MODEL} (on demand only)")
     else:
         print("[vision] disabled (no FIREWORKS_API_KEY): scene summary is YOLO labels only")
-    threading.Thread(target=scene_analyzer_loop, daemon=True).start()
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -514,11 +522,18 @@ def _build_assist_prompt(query: str, seen: str, scene: str, has_image: bool) -> 
     # thing standing between the user and a hallucinated obstacle.
     if has_image:
         grounding = (
-            "A photo of the path directly ahead of them is attached. Answer questions about "
-            "their surroundings from that photo. You may describe things the object detector "
-            "cannot label — steps, kerbs, broken ground, puddles, barriers — and you may read "
-            "aloud any sign or text you can see in it. Never state anything the photo does not "
-            "actually show.\n\n"
+            "A photo of the path directly ahead of them is attached, taken just now. Answer "
+            "questions about their surroundings from that photo. You may describe things the "
+            "object detector cannot label — steps, kerbs, broken ground, puddles, barriers — "
+            "and you may read aloud any sign or text you can see in it. Never state anything "
+            "the photo does not actually show.\n"
+            # The two sources disagree sooner or later — a bin detected as a person, a box the
+            # detector never saw. Say plainly which wins, and on what: the photo is the truth
+            # about WHAT is there, the detector is the truth about HOW FAR, because a step
+            # count comes from box geometry and cannot be eyeballed from a picture.
+            "The detector's output is listed below too. Trust the photo about what is actually "
+            "there, and trust the detector's step counts for how far away it is. If they "
+            "disagree about what something is, believe your eyes.\n\n"
         )
     else:
         grounding = (
@@ -544,8 +559,13 @@ def _build_assist_prompt(query: str, seen: str, scene: str, has_image: bool) -> 
         "the app supplies those itself.\n"
         + grounding +
         f"Object detector output: {seen}\n"
-        f"Scene summary: {scene}\n\n"
-        f"What they said: {query}"
+        # The stored scene summary is only refreshed when the user presses Objects, so
+        # by now it can be minutes old and describe pavement they have already walked
+        # past. Handing that to a model that is holding a live photo is worse than
+        # useless — it invites it to describe a place that is no longer there. Only the
+        # text-only path, which has no photo, has any use for it.
+        + ("" if has_image else f"Scene summary: {scene}\n")
+        + f"\nWhat they said: {query}"
     )
 
 

@@ -303,6 +303,23 @@ function normalizeAngleDiff(bearing, heading) {
   return diff
 }
 
+// ==========================================
+// PROXIMITY WARNINGS
+// ==========================================
+// Something close enough to walk into is worth saying without being asked. Saying it
+// over and over is not — a bollard you are standing next to is still there, and
+// repeating that every few seconds is noise a blind user then has to talk over.
+//
+// So the warning is edge-triggered: it fires on the transition into the danger zone
+// and then latches. Standing in front of the same obstacle stays silent. The latch
+// only clears when the object actually leaves the frame, which is what makes a
+// second warning mean something new — it came back.
+const DANGER_STEPS = 3
+// YOLO drops a box for a frame or two constantly; without this grace period that
+// flicker would read as "left and came back" and re-fire the warning, which is
+// exactly the loop we are removing. It must outlast a dropped frame, not a real exit.
+const REARM_AFTER_ABSENT_MS = 2000
+
 function buildObjectsNarration(objs) {
   if (!objs || objs.length === 0) return "No objects currently detected in view."
   const sorted = [...objs].sort((a, b) => (a.steps_away ?? 99) - (b.steps_away ?? 99))
@@ -371,7 +388,7 @@ export default function App() {
   const captureCanvasRef = useRef(null)
   const inFlightRef = useRef(false)
   const lastSentAtRef = useRef(0)
-  const spokenObjectsCooldownRef = useRef({})
+  const dangerLatchRef = useRef({})
   const actionIdRef = useRef(0)
 
   const voiceEnabledRef = useRef(voiceEnabled)
@@ -564,13 +581,60 @@ export default function App() {
     }
   }
 
-  function handleObjectButton() {
+  // Fires once when something comes within DANGER_STEPS, then stays quiet for as long
+  // as it is on screen. See the constants above for why it latches rather than repeats.
+  function announceDangers(liveObjects) {
+    const now = Date.now()
+    const latch = dangerLatchRef.current
+
+    liveObjects.forEach((obj) => {
+      const entry = latch[obj.name] || { warned: false, lastSeenAt: 0 }
+      entry.lastSeenAt = now
+      latch[obj.name] = entry
+
+      if (obj.steps_away > DANGER_STEPS || entry.warned) return
+      entry.warned = true
+      const where = obj.position === 'center' ? 'ahead' : `on your ${obj.position}`
+      audioQueue.speakAmbient(`${obj.name}, ${obj.steps_away} steps ${where}.`, 1.15, voiceEnabledRef)
+    })
+
+    // Re-arm only once it has genuinely gone, not merely blinked out for a frame.
+    Object.keys(latch).forEach((name) => {
+      if (now - latch[name].lastSeenAt > REARM_AFTER_ABSENT_MS) delete latch[name]
+    })
+  }
+
+  // Objects is a question, not a subscription: it looks once, says what it sees, stops.
+  // Nothing re-analyzes the scene on its own, so this is where the fresh look happens.
+  async function handleObjectButton() {
     const id = beginAction('object')
-    const description = (aiDescRef.current && aiDescRef.current !== "Initializing environment orientation...")
-      ? aiDescRef.current
-      : "Environment analysis is still initializing."
-    const objectsNarration = buildObjectsNarration(objectsRef.current)
-    audioQueue.speakExplicit([description, objectsNarration], 1.1, voiceEnabledRef, () => finishAction(id))
+
+    if (!runningRef.current) {
+      audioQueue.speakExplicit(['The camera is not running.'], 1.1, voiceEnabledRef, () => finishAction(id))
+      return
+    }
+
+    const speakFallback = () =>
+      audioQueue.speakExplicit([buildObjectsNarration(objectsRef.current)], 1.1, voiceEnabledRef, () => finishAction(id))
+
+    try {
+      const res = await fetch(`${BACKEND}/api/scene`, { method: 'POST' })
+      const data = await res.json()
+      if (isStaleAction(id)) return
+
+      if (!data.success || !data.summary) {
+        speakFallback()
+        return
+      }
+
+      setAiDescription(data.summary)
+      logToConsole(`[OBJECTS · SCENE]: ${data.summary}`)
+      const objectsNarration = buildObjectsNarration(data.objects || objectsRef.current)
+      audioQueue.speakExplicit([data.summary, objectsNarration], 1.1, voiceEnabledRef, () => finishAction(id))
+    } catch (err) {
+      if (isStaleAction(id)) return
+      speakFallback()
+    }
   }
 
   function handleWeatherButton() {
@@ -827,16 +891,7 @@ export default function App() {
             setObjects(liveObjects)
             drawOverlay(liveObjects)
             if (data.description && data.description !== aiDescRef.current) { setAiDescription(data.description) }
-            if (voiceEnabledRef.current) {
-              const now = Date.now()
-              liveObjects.forEach((obj) => {
-                const lastSpoken = spokenObjectsCooldownRef.current[obj.name] || 0
-                if (!lastSpoken || (now - lastSpoken > 6000)) {
-                  spokenObjectsCooldownRef.current[obj.name] = now
-                  audioQueue.speakAmbient(`${obj.name}, ${obj.steps_away} steps away on your ${obj.position}.`, 1.15, voiceEnabledRef)
-                }
-              })
-            }
+            if (voiceEnabledRef.current) announceDangers(liveObjects)
           } else { setObjects([]) }
         } catch (e) { console.error(e) }
       }
@@ -877,12 +932,6 @@ export default function App() {
     }
   }, [running])
 
-  useEffect(() => {
-    if (running && voiceEnabled && aiDescription && aiDescription !== "Initializing environment orientation...") {
-      audioQueue.speakAmbient(aiDescription, 1.1, voiceEnabledRef)
-    }
-  }, [aiDescription, voiceEnabled, running])
-
   function snapshot() {
     const video = videoRef.current
     if (!video || !video.videoWidth) return
@@ -904,7 +953,11 @@ export default function App() {
   function toggleRunning() {
     const nextState = !running
     setRunning(nextState)
-    if (!nextState) audioQueue.clearAll()
+    if (!nextState) {
+      audioQueue.clearAll()
+      // Otherwise a still-latched obstacle would be silently swallowed on resume.
+      dangerLatchRef.current = {}
+    }
   }
 
   // The camera is the user's own device — on a phone this is the rear camera,
@@ -937,6 +990,7 @@ export default function App() {
     setObjects([])
     drawOverlay([])
     audioQueue.clearAll()
+    dangerLatchRef.current = {}
     logToConsole('[SENSOR]: Camera stream released.')
   }
 
@@ -968,9 +1022,9 @@ export default function App() {
       spine: 'Objects',
       glyph: <IconScan />,
       title: 'Objects',
-      description: 'Reads out the macro scene summary followed by every tracked object, nearest first, with steps and bearing.',
-      idle: 'Environment · Objects',
-      ariaLabel: 'Describe environment and detected objects',
+      description: 'Looks at the path right now and describes what is in front of you, nearest first — including hazards and signs the detector cannot name. Speaks once.',
+      idle: 'Look once · Describe',
+      ariaLabel: 'Describe what is in front of me right now',
       onClick: handleObjectButton,
       disabled: activeAction === 'object',
       tint: { '--ub-glow': 'rgba(139,92,246,0.55)', '--ub-soft': 'rgba(139,92,246,0.17)', '--ub-base': '#33246e', '--ub-deep': '#1b1440', '--ub-status': '#ddd6fe' },
