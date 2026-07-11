@@ -67,11 +67,15 @@ Note that browsers only grant camera access on `localhost` or over HTTPS.
 
 **Backend** — Render Web Service:
 
-- Build: `pip install -r requirements.txt`
+- Build: `pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu && pip install -r requirements.txt`
 - Start: `uvicorn server:app --host 0.0.0.0 --port $PORT`
 - Env: `GROQ_API_KEY`
 
-Torch and Ultralytics are heavy; the free instance type is not enough.
+Install torch from the CPU index as shown. A plain `pip install -r requirements.txt`
+pulls the CUDA build of torch — several GB of NVIDIA libraries that a CPU instance
+downloads and then never uses, which makes deploys crawl.
+
+Torch and Ultralytics are heavy even so; the free instance type is not enough.
 
 **Frontend** — Render Static Site:
 
