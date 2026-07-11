@@ -1,6 +1,7 @@
 import threading
 import time
 import asyncio
+import base64
 import os
 import re
 import json
@@ -32,6 +33,33 @@ app.add_middleware(
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
+# ==========================================
+# VISION-LANGUAGE MODEL (optional)
+# ==========================================
+# YOLO only knows COCO's 80 classes. It cannot see a pothole, a kerb, a flight of
+# steps, a puddle, or the text on a sign — and those are most of what actually
+# matters underfoot. Without a VLM the scene summary is the LLM guessing at an
+# environment from a bag of class names, having never seen a pixel.
+#
+# When a Fireworks key is present we send the real frame to a VLM instead. It runs
+# on a slow loop, deliberately far away from the detection path: a VLM takes
+# seconds, and the obstacle warnings depend on the frame loop staying realtime.
+#
+# Everything degrades to the label-only path if the key is absent or a call fails.
+FIREWORKS_API_KEY = os.environ.get("FIREWORKS_API_KEY")
+# Must be a model whose /v1/models entry has supports_image_input=true. Most of the
+# catalogue is text-only and will simply ignore the image, which fails silently:
+# you get a confident answer about a photo the model never saw.
+FIREWORKS_VLM_MODEL = os.environ.get(
+    "FIREWORKS_VLM_MODEL", "accounts/fireworks/models/kimi-k2p6"
+)
+FIREWORKS_URL = "https://api.fireworks.ai/inference/v1/chat/completions"
+VISION_ENABLED = bool(FIREWORKS_API_KEY)
+
+# Seconds between VLM calls while the camera is streaming. This is the only knob
+# that meaningfully moves cost.
+VLM_INTERVAL_S = float(os.environ.get("VLM_INTERVAL_S", "6"))
+
 MODEL_PATH = os.environ.get("YOLO_MODEL", "yolo11n.onnx")
 
 # The camera lives in the user's browser, not on this server. Frames arrive over
@@ -43,7 +71,57 @@ model_lock = threading.Lock()
 state_lock = threading.Lock()
 latest_objects: List[dict] = []
 latest_frame_at = 0.0
+# The most recent JPEG exactly as the browser sent it — already downscaled to 640px,
+# which is what the VLM wants anyway. Held so the slow vision loop and the assistant
+# can look at the real image instead of a list of labels.
+latest_frame_jpeg: Optional[bytes] = None
 global_scene_context = "Scanning layout framework..."
+
+
+def _vlm_chat(prompt: str, jpeg: bytes, max_tokens: int = 60,
+              temperature: float = 0.2, json_mode: bool = False) -> str:
+    """One frame plus a prompt to the Fireworks VLM. Raises on any failure —
+    every caller is expected to fall back to the label-only path.
+
+    reasoning_effort=none is load-bearing, not a tuning knob. Kimi is a reasoning
+    model and by default streams its chain-of-thought into `content` with no
+    delimiter to strip and no separate field to ignore — so the text we would end
+    up speaking to a blind user is the model thinking out loud, and it burns the
+    whole token budget deliberating before it ever reaches an answer. Turning
+    reasoning off takes a call from 400+ completion tokens and no usable output to
+    ~22 tokens and a clean sentence. JSON mode does not suppress it; only this does.
+    """
+    body = {
+        "model": FIREWORKS_VLM_MODEL,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "reasoning_effort": "none",
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {
+                    "url": "data:image/jpeg;base64," + base64.b64encode(jpeg).decode(),
+                }},
+            ],
+        }],
+    }
+    if json_mode:
+        body["response_format"] = {"type": "json_object"}
+
+    req = urllib.request.Request(
+        FIREWORKS_URL,
+        data=json.dumps(body).encode(),
+        headers={
+            "Authorization": f"Bearer {FIREWORKS_API_KEY}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        payload = json.loads(resp.read().decode())
+    return payload["choices"][0]["message"]["content"].strip()
 
 
 def run_detection(frame):
@@ -83,44 +161,83 @@ def run_detection(frame):
 # ==========================================
 # SCENE ANALYZER — summarizes whatever the camera is currently looking at
 # ==========================================
+VLM_SCENE_PROMPT = (
+    "You are the eyes of a blind pedestrian walking forward. This photo is the path "
+    "directly ahead of them, taken a moment ago.\n"
+    "Say what matters for their next few steps. Prioritise walking hazards an object "
+    "detector cannot label: broken pavement, potholes, steps, kerbs, puddles, wet floor, "
+    "construction barriers, a blocked footpath, a closed crossing.\n"
+    "Reply with ONE sentence, at most 20 words, spoken plain English, second person. "
+    "No markdown, no preamble. If the way ahead is clear, say so."
+)
+
+
+def _scene_from_labels(objects) -> Optional[str]:
+    """The original summary: the LLM never sees the image, it guesses an environment
+    from a bag of class names. Kept as the fallback when no VLM is configured."""
+    if not groq_client:
+        return None
+
+    unique_items = list({obj["name"] for obj in objects})
+    items_string = ", ".join(unique_items) if unique_items else "clear space"
+    prompt = (
+        f"Analyze these environment tokens: {items_string}. "
+        "In exactly 4 to 7 words, identify the macro environment or room layout. "
+        "Keep it strictly brief, descriptive, and clean. No formatting or commentary."
+    )
+    try:
+        completion = groq_client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model="llama-3.1-8b-instant",
+            temperature=0.2,
+            max_tokens=25,
+        )
+        return completion.choices[0].message.content
+    except Exception:
+        return None
+
+
 def scene_analyzer_loop():
     global global_scene_context
     time.sleep(3.0)
     while True:
         with state_lock:
             current_objs = list(latest_objects)
+            frame_jpeg = latest_frame_jpeg
             idle = (time.time() - latest_frame_at) > 15.0
 
-        # No frames arriving means no camera is streaming; don't burn Groq calls.
-        if idle or not groq_client:
+        # No frames arriving means no camera is streaming; don't burn API calls.
+        if idle or not (VISION_ENABLED or groq_client):
             time.sleep(5.0)
             continue
 
-        unique_items = list({obj["name"] for obj in current_objs})
-        items_string = ", ".join(unique_items) if unique_items else "clear space"
+        text = None
+        if VISION_ENABLED and frame_jpeg:
+            try:
+                text = _vlm_chat(VLM_SCENE_PROMPT, frame_jpeg, max_tokens=48)
+            except Exception:
+                text = None  # fall through to labels rather than go silent
 
-        scene_prompt = (
-            f"Analyze these environment tokens: {items_string}. "
-            "In exactly 4 to 7 words, identify the macro environment or room layout. "
-            "Keep it strictly brief, descriptive, and clean. No formatting or commentary."
-        )
-        try:
-            completion = groq_client.chat.completions.create(
-                messages=[{"role": "user", "content": scene_prompt}],
-                model="llama-3.1-8b-instant",
-                temperature=0.2,
-                max_tokens=25,
-            )
-            clean_text = completion.choices[0].message.content.strip().replace('"', '').replace('*', '')
-            with state_lock:
-                global_scene_context = clean_text
-        except Exception:
-            pass
-        time.sleep(10.0)
+        if text is None:
+            text = _scene_from_labels(current_objs)
+
+        if text:
+            clean_text = text.strip().replace('"', '').replace('*', '').replace('#', '')
+            if clean_text:
+                with state_lock:
+                    global_scene_context = clean_text
+
+        time.sleep(VLM_INTERVAL_S if VISION_ENABLED else 10.0)
 
 
 @app.on_event("startup")
 def start_background_tasks():
+    # The VLM falls back silently on failure, which is right for a walking aid but
+    # makes "is vision actually on?" impossible to answer from behaviour alone.
+    if VISION_ENABLED:
+        print(f"[vision] Fireworks VLM enabled: {FIREWORKS_VLM_MODEL}, every {VLM_INTERVAL_S:g}s")
+    else:
+        print("[vision] disabled (no FIREWORKS_API_KEY): scene summary is YOLO labels only")
     threading.Thread(target=scene_analyzer_loop, daemon=True).start()
 
 
@@ -390,21 +507,26 @@ def _parse_assistant_json(raw: str) -> dict:
     return {"intent": "navigate", "destination": destination.strip(), "response": response}
 
 
-@app.post("/api/ai_assist")
-def ai_assist(payload: AiQuery):
-    if not groq_client:
-        return {"success": False, "message": "AI reasoning engine unavailable (no GROQ_API_KEY configured)."}
-
-    with state_lock:
-        objs = list(latest_objects)
-        scene = global_scene_context
-
-    if objs:
-        seen = "; ".join(f"{o['name']} ({o['steps_away']} steps, {o['position']})" for o in objs[:8])
+def _build_assist_prompt(query: str, seen: str, scene: str, has_image: bool) -> str:
+    # With a frame attached the model can see for itself, so the "never mention
+    # anything not in the list" guardrail becomes wrong — it would gag the model
+    # about the very hazards YOLO has no class for. Without a frame it is the only
+    # thing standing between the user and a hallucinated obstacle.
+    if has_image:
+        grounding = (
+            "A photo of the path directly ahead of them is attached. Answer questions about "
+            "their surroundings from that photo. You may describe things the object detector "
+            "cannot label — steps, kerbs, broken ground, puddles, barriers — and you may read "
+            "aloud any sign or text you can see in it. Never state anything the photo does not "
+            "actually show.\n\n"
+        )
     else:
-        seen = "nothing detected right now"
+        grounding = (
+            "For questions about their surroundings, use only the camera data below; never "
+            "invent objects that are not listed.\n\n"
+        )
 
-    prompt = (
+    return (
         "You are a voice assistant for a blind pedestrian who is listening through text-to-speech.\n\n"
         "First decide what they want:\n"
         "- If they are asking to travel or walk somewhere, or to set/change a destination "
@@ -420,22 +542,59 @@ def ai_assist(payload: AiQuery):
         "For a navigate intent, simply confirm where you are taking them, for example "
         "'Setting a route to the train station now.' Do not state distances or directions — "
         "the app supplies those itself.\n"
-        "For questions about their surroundings, use only the camera data below; never invent "
-        "objects that are not listed.\n\n"
-        f"What the camera sees right now: {seen}\n"
+        + grounding +
+        f"Object detector output: {seen}\n"
         f"Scene summary: {scene}\n\n"
-        f"What they said: {payload.query}"
+        f"What they said: {query}"
     )
 
+
+@app.post("/api/ai_assist")
+def ai_assist(payload: AiQuery):
+    if not (groq_client or VISION_ENABLED):
+        return {"success": False, "message": "AI reasoning engine unavailable (no GROQ_API_KEY configured)."}
+
+    with state_lock:
+        objs = list(latest_objects)
+        scene = global_scene_context
+        frame_jpeg = latest_frame_jpeg
+
+    if objs:
+        seen = "; ".join(f"{o['name']} ({o['steps_away']} steps, {o['position']})" for o in objs[:8])
+    else:
+        seen = "nothing detected right now"
+
+    # Ask the VLM against the live frame when we can — this is the whole point of
+    # it: "what does that sign say" and "are there steps" are unanswerable from a
+    # list of COCO labels. It costs a second or two, which is fine here; the user
+    # asked a question and is waiting. It would not be fine on the Guide Me path.
+    raw = None
+    if VISION_ENABLED and frame_jpeg:
+        try:
+            raw = _vlm_chat(
+                _build_assist_prompt(payload.query, seen, scene, has_image=True),
+                frame_jpeg,
+                max_tokens=200,
+                temperature=0.3,
+                json_mode=True,
+            )
+        except Exception:
+            raw = None  # fall through to the text-only assistant
+
     try:
-        completion = groq_client.chat.completions.create(
-            messages=[{"role": "user", "content": prompt}],
-            model="llama-3.1-8b-instant",
-            temperature=0.3,
-            max_tokens=160,
-            response_format={"type": "json_object"},
-        )
-        raw = completion.choices[0].message.content.strip()
+        if raw is None:
+            if not groq_client:
+                return {"success": False, "message": "AI reasoning engine unavailable."}
+            completion = groq_client.chat.completions.create(
+                messages=[{"role": "user", "content": _build_assist_prompt(
+                    payload.query, seen, scene, has_image=False)}],
+                model="llama-3.1-8b-instant",
+                temperature=0.3,
+                max_tokens=160,
+                response_format={"type": "json_object"},
+            )
+            raw = completion.choices[0].message.content.strip()
+
         parsed = _parse_assistant_json(raw)
 
         response = parsed["response"].replace("*", "").replace("#", "").strip()
@@ -548,7 +707,7 @@ def generate_fused_briefing(payload: BriefingRequest):
 # ==========================================
 @app.websocket('/ws')
 async def websocket_endpoint(websocket: WebSocket):
-    global latest_objects, latest_frame_at
+    global latest_objects, latest_frame_at, latest_frame_jpeg
 
     await websocket.accept()
     loop = asyncio.get_running_loop()
@@ -583,6 +742,7 @@ async def websocket_endpoint(websocket: WebSocket):
             with state_lock:
                 latest_objects = objects
                 latest_frame_at = now
+                latest_frame_jpeg = data
                 description = global_scene_context
 
             await websocket.send_json({
@@ -597,3 +757,4 @@ async def websocket_endpoint(websocket: WebSocket):
     finally:
         with state_lock:
             latest_objects = []
+            latest_frame_jpeg = None
