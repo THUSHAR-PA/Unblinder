@@ -78,12 +78,48 @@ const IconVolumeOff = () => (
   </svg>
 )
 
+const IconSun = () => (
+  <svg {...svgBase}>
+    <circle cx="12" cy="12" r="4.2" />
+    <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
+  </svg>
+)
+
+const IconMoon = () => (
+  <svg {...svgBase}>
+    <path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a7 7 0 1 0 10.5 10.5Z" />
+  </svg>
+)
+
+// ==========================================
+// THEME TOGGLE
+// Every colour in the app resolves through a CSS variable, so flipping
+// data-theme on <html> repaints everything at once — there is no per-component
+// theme logic anywhere else.
+// ==========================================
+function ThemeToggle({ theme, onToggle }) {
+  const isDark = theme === 'dark'
+  return (
+    <button
+      type="button"
+      className={`ub-theme${isDark ? ' is-dark' : ''}`}
+      onClick={onToggle}
+      aria-label={`Switch to ${isDark ? 'light' : 'dark'} theme`}
+      title={`Switch to ${isDark ? 'light' : 'dark'} theme`}
+    >
+      <span className="ub-theme-thumb" aria-hidden="true" />
+      <span className="ub-theme-ico is-sun" aria-hidden="true"><IconSun /></span>
+      <span className="ub-theme-ico is-moon" aria-hidden="true"><IconMoon /></span>
+    </button>
+  )
+}
+
 // ==========================================
 // CUSTOM MAP ICONS (Bypasses default Leaflet image bugs)
 // ==========================================
 const userIcon = new L.DivIcon({
   className: 'custom-user-icon',
-  html: `<div style="background-color: #06b6d4; width: 18px; height: 18px; border-radius: 50%; border: 3px solid white; box-shadow: 0 0 15px #06b6d4;"></div>`,
+  html: `<div style="background-color: #0284c7; width: 18px; height: 18px; border-radius: 50%; border: 3px solid white; box-shadow: 0 0 15px #0284c7;"></div>`,
   iconSize: [18, 18],
   iconAnchor: [9, 9]
 });
@@ -230,6 +266,12 @@ const audioQueue = new SpeechQueueManager()
 // ==========================================
 // SPATIAL GEOMETRY MATHEMATICAL COMPUTATIONS
 // ==========================================
+// A pasted map link is fine to route with, but must never be read aloud.
+function isMapLink(text) {
+  const t = (text || '').trim().toLowerCase()
+  return t.startsWith('http://') || t.startsWith('https://') || t.includes('goo.gl') || t.includes('google.com/maps')
+}
+
 function computeHaversineDistance(lat1, lon1, lat2, lon2) {
   const R = 6371000
   const dLat = (lat2 - lat1) * Math.PI / 180
@@ -304,6 +346,19 @@ export default function App() {
   const [speechState, setSpeechState] = useState({ isPlaying: false, priority: null })
   
   // VOICE RECOGNITION (AI ASSISTANT) STATE
+  const [theme, setTheme] = useState(() => {
+    try {
+      const saved = localStorage.getItem('ub-theme')
+      if (saved === 'dark' || saved === 'light') return saved
+    } catch (e) { /* private mode: fall through to the default */ }
+    return 'light'
+  })
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme
+    try { localStorage.setItem('ub-theme', theme) } catch (e) { /* not fatal */ }
+  }, [theme])
+
   const [isListening, setIsListening] = useState(false)
   const recognitionRef = useRef(null)
   const aiPhaseRef = useRef('idle') // Tracks 'idle' | 'listening' | 'processing'
@@ -568,6 +623,14 @@ export default function App() {
   async function handleAiQuery(query) {
     const id = beginAction('ai_assist')
     logToConsole(`[AI ASSISTANT]: Querying "${query}"...`)
+
+    // Releases the mic/ambient-speech lock once the assistant has finished talking.
+    const release = () => {
+      aiPhaseRef.current = 'idle'
+      audioQueue.isAmbientSuppressed = false
+      finishAction(id)
+    }
+
     try {
       const res = await fetch(`${BACKEND}/api/ai_assist`, {
         method: 'POST',
@@ -576,56 +639,87 @@ export default function App() {
       })
       const data = await res.json()
       if (isStaleAction(id)) return
-      
-      if (data.success && data.response) {
-        audioQueue.speakExplicit([data.response], 1.1, voiceEnabledRef, () => {
-          aiPhaseRef.current = 'idle'
-          audioQueue.isAmbientSuppressed = false // Clear tracking suppression lock when AI finishes speaking
-          finishAction(id)
-        })
-      } else {
-        audioQueue.speakExplicit(["AI Assistant connection error."], 1.1, voiceEnabledRef, () => {
-          aiPhaseRef.current = 'idle'
-          audioQueue.isAmbientSuppressed = false
-          finishAction(id)
-        })
-      }
-    } catch (e) {
-      if (isStaleAction(id)) return
-      audioQueue.speakExplicit(["AI Assistant connection error."], 1.1, voiceEnabledRef, () => {
-        aiPhaseRef.current = 'idle'
-        audioQueue.isAmbientSuppressed = false
-        finishAction(id)
-      })
-    }
-  }
 
-  async function executeRoutingProcess(e) {
-    e.preventDefault()
-    if (!destinationInput.trim()) return
-    logToConsole(`Wiping tracking metrics. Fetching grid for: "${destinationInput}"`)
-    setNavRouteData(null)
-    setIsNavigating(false)
-
-    let startLat = 10.0150, startLon = 76.3280
-    if (currentPosition) { startLat = currentPosition.lat; startLon = currentPosition.lon }
-
-    try {
-      const geoRes = await fetch(`${BACKEND}/api/geocode?query=${encodeURIComponent(destinationInput)}`)
-      const geoData = await geoRes.json()
-      if (!geoData.success) {
-        audioQueue.speakExplicit(["Unable to map target coordinates."], 1.1, voiceEnabledRef)
+      if (!data.success || !data.response) {
+        audioQueue.speakExplicit(["AI Assistant connection error."], 1.1, voiceEnabledRef, release)
         return
       }
 
+      // "Take me to the train station" — the assistant heard a destination, so
+      // set the route itself instead of just answering.
+      if (data.intent === 'navigate' && data.destination) {
+        logToConsole(`[AI ASSISTANT]: Destination intent → "${data.destination}"`)
+        await beginNavigation(data.destination, { spokenPrefix: [data.response], onSpoken: release })
+        return
+      }
+
+      audioQueue.speakExplicit([data.response], 1.1, voiceEnabledRef, release)
+    } catch (e) {
+      if (isStaleAction(id)) return
+      audioQueue.speakExplicit(["AI Assistant connection error."], 1.1, voiceEnabledRef, release)
+    }
+  }
+
+  // Geocodes a destination and locks in a walking route to it. Callable from the
+  // form or from the voice assistant, so speaking a destination and typing one
+  // take exactly the same path.
+  //
+  // spokenPrefix is spoken immediately before the outcome. It exists because
+  // speakExplicit cancels whatever is already talking — so the assistant's
+  // acknowledgement and the routing result have to go out as one utterance,
+  // or the second would cut off the first.
+  async function beginNavigation(destination, { spokenPrefix = [], onSpoken } = {}) {
+    const target = (destination || '').trim()
+    if (!target) return false
+
+    logToConsole(`Wiping tracking metrics. Fetching grid for: "${target}"`)
+    setDestinationInput(target)
+    setNavRouteData(null)
+    setIsNavigating(false)
+
+    const speak = (lines) => audioQueue.speakExplicit([...spokenPrefix, ...lines], 1.1, voiceEnabledRef, onSpoken)
+
+    let startLat = 10.0150, startLon = 76.3280
+    if (currentPositionRef.current) {
+      startLat = currentPositionRef.current.lat
+      startLon = currentPositionRef.current.lon
+    }
+
+    // A pasted URL is unspeakable — never read it back out loud.
+    const spokenTarget = isMapLink(target) ? 'that map link' : target
+
+    try {
+      const geoRes = await fetch(`${BACKEND}/api/resolve?query=${encodeURIComponent(target)}`)
+      const geoData = await geoRes.json()
+      if (!geoData.success) {
+        logToConsole(`Could not resolve "${target}": ${geoData.message || 'unknown reason'}`)
+        speak([`I could not find ${spokenTarget} on the map.`])
+        return false
+      }
+      logToConsole(`Target locked via ${geoData.source} — ${geoData.display_name}`)
+
       const routeRes = await fetch(`${BACKEND}/api/route?start_lat=${startLat}&start_lon=${startLon}&end_lat=${geoData.lat}&end_lon=${geoData.lon}`)
       const routeData = await routeRes.json()
-      if (!routeData.success) { logToConsole(`Routing Denied.`); return }
+      if (!routeData.success) {
+        logToConsole('Routing Denied.')
+        speak([`I found ${spokenTarget}, but I could not trace a walking route to it.`])
+        return false
+      }
 
       setNavRouteData(routeData)
       setIsNavigating(true)
-      audioQueue.speakExplicit([`New itinerary locked. Distance is ${Math.round(routeData.total_distance_meters)} meters.`], 1.1, voiceEnabledRef)
-    } catch (err) { logToConsole(`Telemetry Exception: ${err.message}`) }
+      speak([`New itinerary locked. Distance is ${Math.round(routeData.total_distance_meters)} meters.`])
+      return true
+    } catch (err) {
+      logToConsole(`Telemetry Exception: ${err.message}`)
+      speak(['Navigation failed. Please try again.'])
+      return false
+    }
+  }
+
+  function executeRoutingProcess(e) {
+    e.preventDefault()
+    beginNavigation(destinationInput)
   }
 
   // Maps the normalized box coords the server returns onto the letterboxed
@@ -867,7 +961,7 @@ export default function App() {
       ariaLabel: 'Guide me: get spoken navigation directions',
       onClick: handleGuideMeButton,
       disabled: activeAction === 'guide',
-      tint: { '--ub-glow': 'rgba(234,88,12,0.55)', '--ub-soft': 'rgba(234,88,12,0.17)', '--ub-base': '#2a1206', '--ub-status': '#fdba74' },
+      tint: { '--ub-glow': 'rgba(2,132,199,0.55)', '--ub-soft': 'rgba(2,132,199,0.17)', '--ub-base': '#0b3a5d', '--ub-status': '#bae6fd' },
     },
     {
       id: 'object',
@@ -879,7 +973,7 @@ export default function App() {
       ariaLabel: 'Describe environment and detected objects',
       onClick: handleObjectButton,
       disabled: activeAction === 'object',
-      tint: { '--ub-glow': 'rgba(2,132,199,0.55)', '--ub-soft': 'rgba(2,132,199,0.17)', '--ub-base': '#04223a', '--ub-status': '#7dd3fc' },
+      tint: { '--ub-glow': 'rgba(6,182,212,0.55)', '--ub-soft': 'rgba(6,182,212,0.17)', '--ub-base': '#06373f', '--ub-status': '#67e8f9' },
     },
     {
       id: 'weather',
@@ -891,7 +985,7 @@ export default function App() {
       ariaLabel: 'Get current weather report',
       onClick: handleWeatherButton,
       disabled: activeAction === 'weather',
-      tint: { '--ub-glow': 'rgba(16,185,129,0.5)', '--ub-soft': 'rgba(16,185,129,0.15)', '--ub-base': '#04251b', '--ub-status': '#6ee7b7' },
+      tint: { '--ub-glow': 'rgba(59,130,246,0.55)', '--ub-soft': 'rgba(59,130,246,0.16)', '--ub-base': '#14346b', '--ub-status': '#93c5fd' },
     },
     {
       id: 'ai_assist',
@@ -906,24 +1000,27 @@ export default function App() {
       onClick: toggleListen,
       disabled: false,
       tint: isListening
-        ? { '--ub-glow': 'rgba(239,68,68,0.6)', '--ub-soft': 'rgba(239,68,68,0.18)', '--ub-base': '#2c0b0f', '--ub-status': '#fca5a5' }
-        : { '--ub-glow': 'rgba(99,102,241,0.55)', '--ub-soft': 'rgba(99,102,241,0.17)', '--ub-base': '#171436', '--ub-status': '#a5b4fc' },
+        // Listening stays red on purpose — it's an alert state, not a theme colour.
+        ? { '--ub-glow': 'rgba(239,68,68,0.6)', '--ub-soft': 'rgba(239,68,68,0.18)', '--ub-base': '#4c1d1d', '--ub-status': '#fecaca' }
+        : { '--ub-glow': 'rgba(99,102,241,0.55)', '--ub-soft': 'rgba(99,102,241,0.17)', '--ub-base': '#1e2a5e', '--ub-status': '#c7d2fe' },
     },
   ]
 
 return (
-    <div className="unblinder-app" style={{ minHeight: '100vh', background: '#030712', color: '#f3f4f6', fontFamily: 'sans-serif', padding: '2rem' }}>
+    <div className="unblinder-app" style={{ minHeight: '100vh', background: 'var(--surface-2)', color: 'var(--text)', fontFamily: 'sans-serif', padding: '2rem' }}>
 
-      <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem', paddingBottom: '1.5rem', borderBottom: '1px solid #1f2937' }}>
+      <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem', paddingBottom: '1.5rem', borderBottom: '1px solid var(--border)' }}>
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <span style={{ height: '10px', width: '10px', borderRadius: '50%', background: '#10b981', boxShadow: '0 0 12px #10b981' }} />
-            <h1 style={{ fontSize: '2rem', fontWeight: '800', letterSpacing: '-0.05em', background: 'linear-gradient(to right, #ffffff, #9ca3af)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>UNBLINDER COGNITIVE CONSOLE</h1>
+            <span style={{ height: '10px', width: '10px', borderRadius: '50%', background: 'var(--accent-2)', boxShadow: '0 0 12px var(--accent-2)' }} />
+            <h1 style={{ fontSize: '2rem', fontWeight: '800', letterSpacing: '-0.05em', background: 'linear-gradient(to right, var(--title-a), var(--title-b))', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>UNBLINDER COGNITIVE CONSOLE</h1>
           </div>
-          <p style={{ color: '#9ca3af', fontSize: '0.95rem', marginTop: '4px' }}>Tactical Core Architecture • Accelerated Spatial Telemetry Frame</p>
+          <p style={{ color: 'var(--text-muted)', fontSize: '0.95rem', marginTop: '4px' }}>Tactical Core Architecture • Accelerated Spatial Telemetry Frame</p>
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: '16px', background: '#111827', padding: '0.75rem 1.5rem', borderRadius: '14px', border: '1px solid #374151' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '16px', background: 'var(--surface)', padding: '0.75rem 1.5rem', borderRadius: '14px', border: '1px solid var(--border-2)' }}>
+          <ThemeToggle theme={theme} onToggle={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))} />
+
           <label className={`ub-speech${voiceEnabled ? ' is-on' : ''}`}>
             <span className="ub-speech-icon" aria-hidden="true">
               {voiceEnabled ? <IconVolume /> : <IconVolumeOff />}
@@ -967,7 +1064,7 @@ return (
               <span className={running ? 'is-hidden' : undefined}>Start Camera</span>
             </span>
           </button>
-          <div style={{ fontSize: '0.85rem', fontFamily: 'monospace', color: '#6b7280' }}>LATENCY: {fps > 0 ? `${Math.round(1000/fps)}ms` : '—'} • FPS: {fps}</div>
+          <div style={{ fontSize: '0.85rem', fontFamily: 'monospace', color: 'var(--text-muted)' }}>LATENCY: {fps > 0 ? `${Math.round(1000/fps)}ms` : '—'} • FPS: {fps}</div>
         </div>
       </header>
 
@@ -1011,31 +1108,31 @@ return (
       </section>
 
       {/* SYSTEM CONTROL HUD */}
-      <section style={{ background: 'linear-gradient(to right, #111827, #0b0f19)', border: '1px solid #1f2937', borderRadius: '18px', padding: '1.5rem', marginBottom: '2rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-        <div style={{ borderBottom: '1px solid #1f2937', paddingBottom: '0.75rem' }}>
-          <h2 style={{ fontSize: '1.25rem', fontWeight: '800', color: '#fff' }}>🎯 ADVANCED COGNITIVE SPATIAL MAPPING</h2>
-          <p style={{ color: '#6b7280', fontSize: '0.85rem', fontFamily: 'monospace' }}>REALTIME LOCATION MONITORING INTERFACE</p>
+      <section style={{ background: 'linear-gradient(to right, var(--surface), var(--surface-3))', border: '1px solid var(--border)', borderRadius: '18px', padding: '1.5rem', marginBottom: '2rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+        <div style={{ borderBottom: '1px solid var(--border)', paddingBottom: '0.75rem' }}>
+          <h2 style={{ fontSize: '1.25rem', fontWeight: '800', color: 'var(--text)' }}>🎯 ADVANCED COGNITIVE SPATIAL MAPPING</h2>
+          <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', fontFamily: 'monospace' }}>REALTIME LOCATION MONITORING INTERFACE</p>
         </div>
 
         <form onSubmit={executeRoutingProcess} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 180px', gap: '1rem', alignItems: 'end' }}>
           <div>
-            <label style={{ display: 'block', color: '#9ca3af', fontSize: '0.8rem', fontWeight: '700', marginBottom: '6px', fontFamily: 'monospace' }}>START POINT REFERENCE</label>
-            <input type="text" value={startInput} disabled style={{ width: '100%', padding: '0.75rem 1rem', background: '#030712', border: '1px solid #374151', borderRadius: '10px', color: '#6b7280' }} />
+            <label style={{ display: 'block', color: 'var(--text-muted)', fontSize: '0.8rem', fontWeight: '700', marginBottom: '6px', fontFamily: 'monospace' }}>START POINT REFERENCE</label>
+            <input type="text" value={startInput} disabled style={{ width: '100%', padding: '0.75rem 1rem', background: 'var(--surface-2)', border: '1px solid var(--border-2)', borderRadius: '10px', color: 'var(--text-muted)' }} />
           </div>
           <div>
-            <label style={{ display: 'block', color: '#9ca3af', fontSize: '0.8rem', fontWeight: '700', marginBottom: '6px', fontFamily: 'monospace' }}>SET NEW TARGET DESTINATION</label>
-            <input type="text" placeholder="Enter location target..." value={destinationInput} onChange={(e) => setDestinationInput(e.target.value)} style={{ width: '100%', padding: '0.75rem 1rem', background: '#1f2937', border: '1px solid #4b5563', borderRadius: '10px', color: '#fff', fontWeight: '600' }} />
+            <label style={{ display: 'block', color: 'var(--text-muted)', fontSize: '0.8rem', fontWeight: '700', marginBottom: '6px', fontFamily: 'monospace' }}>SET NEW TARGET DESTINATION</label>
+            <input type="text" placeholder="Place name, coordinates, or a pasted Google Maps link…" value={destinationInput} onChange={(e) => setDestinationInput(e.target.value)} style={{ width: '100%', padding: '0.75rem 1rem', background: 'var(--surface)', border: '1px solid var(--border-strong)', borderRadius: '10px', color: 'var(--text)', fontWeight: '600' }} />
           </div>
-          <button type="submit" style={{ width: '100%', padding: '0.75rem 1rem', background: '#0284c7', color: '#fff', fontWeight: '700', borderRadius: '10px', border: 'none', cursor: 'pointer' }}>🗺️ PLOT MATRIX</button>
+          <button type="submit" style={{ width: '100%', padding: '0.75rem 1rem', background: 'var(--btn-bg)', color: 'var(--btn-ink)', fontWeight: '700', borderRadius: '10px', border: 'none', cursor: 'pointer' }}>🗺️ PLOT MATRIX</button>
         </form>
       </section>
 
       {/* INTERACTIVE LEAFLET MAP SECTION */}
-      <section style={{ background: '#090d16', border: '1px solid #1e293b', borderRadius: '18px', padding: '1.5rem', marginBottom: '2rem' }}>
-        <h3 style={{ fontSize: '1rem', fontFamily: 'monospace', color: '#38bdf8', marginBottom: '1rem', fontWeight: '800' }}>🗺️ HIGH-PRECISION VISUAL POSITIONING VERIFICATION MONITOR</h3>
+      <section style={{ background: 'var(--surface-3)', border: '1px solid var(--border)', borderRadius: '18px', padding: '1.5rem', marginBottom: '2rem' }}>
+        <h3 style={{ fontSize: '1rem', fontFamily: 'monospace', color: 'var(--heading-accent)', marginBottom: '1rem', fontWeight: '800' }}>🗺️ HIGH-PRECISION VISUAL POSITIONING VERIFICATION MONITOR</h3>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 300px', gap: '1.5rem' }}>
           
-          <div style={{ height: '350px', background: '#020617', border: '1px solid #1e293b', borderRadius: '14px', position: 'relative', overflow: 'hidden' }}>
+          <div style={{ height: '350px', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '14px', position: 'relative', overflow: 'hidden' }}>
             {currentPosition ? (
               <MapContainer 
                 center={[currentPosition.lat, currentPosition.lon]} 
@@ -1044,7 +1141,8 @@ return (
                 style={{ height: '100%', width: '100%', zIndex: 1 }}
               >
                 <TileLayer
-                  url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
+                  key={theme}
+                  url={`https://{s}.basemaps.cartocdn.com/${theme === 'dark' ? 'dark_all' : 'light_all'}/{z}/{x}/{y}{r}.png`}
                   attribution='&copy; <a href="https://carto.com/">CartoDB</a>'
                 />
                 
@@ -1055,7 +1153,7 @@ return (
                 {navRouteData && navRouteData.geometry && (
                   <Polyline 
                     positions={navRouteData.geometry.coordinates.map(c => [c[1], c[0]])} 
-                    color="#ea580c" 
+                    color="#0369a1"
                     weight={6} 
                     opacity={0.8}
                     dashArray="10, 12"
@@ -1067,25 +1165,25 @@ return (
                 )}
               </MapContainer>
             ) : (
-              <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#6b7280', fontSize: '0.9rem', fontFamily: 'monospace' }}>
+              <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', fontSize: '0.9rem', fontFamily: 'monospace' }}>
                 [ AWAITING HIGH PRECISION LOCAL HARDWARE GPS CORRELATION LINK ]
               </div>
             )}
           </div>
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', background: '#111827', padding: '1rem', borderRadius: '14px', border: '1px solid #1f2937', fontFamily: 'monospace', fontSize: '0.85rem' }}>
-            <div style={{ color: '#9ca3af', borderBottom: '1px solid #374151', paddingBottom: '4px', fontWeight: 'bold' }}>LIVE TELEMETRY READOUT</div>
-            <div><span style={{ color: '#6b7280' }}>LAT:</span> {currentPosition ? currentPosition.lat.toFixed(6) : "Searching..."}</div>
-            <div><span style={{ color: '#6b7280' }}>LON:</span> {currentPosition ? currentPosition.lon.toFixed(6) : "Searching..."}</div>
-            <div><span style={{ color: '#6b7280' }}>COMPASS BEARING:</span> {deviceHeading}°</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', background: 'var(--surface)', padding: '1rem', borderRadius: '14px', border: '1px solid var(--border)', fontFamily: 'monospace', fontSize: '0.85rem' }}>
+            <div style={{ color: 'var(--text-muted)', borderBottom: '1px solid var(--border-2)', paddingBottom: '4px', fontWeight: 'bold' }}>LIVE TELEMETRY READOUT</div>
+            <div><span style={{ color: 'var(--text-muted)' }}>LAT:</span> {currentPosition ? currentPosition.lat.toFixed(6) : "Searching..."}</div>
+            <div><span style={{ color: 'var(--text-muted)' }}>LON:</span> {currentPosition ? currentPosition.lon.toFixed(6) : "Searching..."}</div>
+            <div><span style={{ color: 'var(--text-muted)' }}>COMPASS BEARING:</span> {deviceHeading}°</div>
             {activeCheckpoint && currentPosition && (
               <>
-                <div><span style={{ color: '#6b7280' }}>TARGET BEARING:</span> {Math.round(computeTargetBearing(currentPosition.lat, currentPosition.lon, activeCheckpoint.lat, activeCheckpoint.lon))}°</div>
-                <div><span style={{ color: '#6b7280' }}>DIST TO NODE:</span> {Math.round(computeHaversineDistance(currentPosition.lat, currentPosition.lon, activeCheckpoint.lat, activeCheckpoint.lon))}m</div>
+                <div><span style={{ color: 'var(--text-muted)' }}>TARGET BEARING:</span> {Math.round(computeTargetBearing(currentPosition.lat, currentPosition.lon, activeCheckpoint.lat, activeCheckpoint.lon))}°</div>
+                <div><span style={{ color: 'var(--text-muted)' }}>DIST TO NODE:</span> {Math.round(computeHaversineDistance(currentPosition.lat, currentPosition.lon, activeCheckpoint.lat, activeCheckpoint.lon))}m</div>
               </>
             )}
-            <div style={{ marginTop: 'auto', paddingTop: '10px', borderTop: '1px solid #374151' }}>
-              <span style={{ color: '#a855f7', fontWeight: 'bold' }}>ROUTE METRIC SCAN:</span><br/>
+            <div style={{ marginTop: 'auto', paddingTop: '10px', borderTop: '1px solid var(--border-2)' }}>
+              <span style={{ color: 'var(--console-text)', fontWeight: 'bold' }}>ROUTE METRIC SCAN:</span><br/>
               {isNavigating ? "🎯 ROUTE ACTIVE" : "💤 STANDBY ENGINE"}
             </div>
           </div>
@@ -1094,7 +1192,7 @@ return (
 
       <main style={{ display: 'grid', gridTemplateColumns: '1fr 420px', gap: '2rem', alignItems: 'start' }}>
         <section style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-          <div style={{ position: 'relative', width: '100%', aspectRatio: '16/9', background: '#000000', borderRadius: '18px', overflow: 'hidden', border: '2px solid #1f2937' }}>
+          <div style={{ position: 'relative', width: '100%', aspectRatio: '16/9', background: 'var(--video-bed)', borderRadius: '18px', overflow: 'hidden', border: '2px solid var(--border)' }}>
             {running ? (
               <>
                 <video
@@ -1102,7 +1200,7 @@ return (
                   autoPlay
                   playsInline
                   muted
-                  style={{ width: '100%', height: '100%', objectFit: 'contain', background: '#000000' }}
+                  style={{ width: '100%', height: '100%', objectFit: 'contain', background: 'var(--video-bed)' }}
                 />
                 <canvas
                   ref={overlayRef}
@@ -1111,52 +1209,52 @@ return (
               </>
             ) : (
               <div style={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
-                <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="#4b5563" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ marginBottom: '1rem' }}><path d="M13 13v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h2.5l.5-1"></path><line x1="2" y1="2" x2="22" y2="22"></line><path d="M10 5h4l2 3h4a2 2 0 0 1 2 2v7.5"></path></svg>
-                <h3 style={{ color: '#9ca3af', fontFamily: 'monospace' }}>SENSOR LINK OFFLINE</h3>
-                <button onClick={startCamera} style={{ background: '#10b981', color: '#022c22', fontWeight: '800', padding: '0.8rem 2rem', borderRadius: '12px', border: 'none', cursor: 'pointer', marginTop: '1rem', display: 'flex', alignItems: 'center', gap: '10px' }}><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M5 3v18l15-9L5 3z"/></svg>ENGAGE CAMERA SENSOR</button>
+                <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="var(--text-faint)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ marginBottom: '1rem' }}><path d="M13 13v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h2.5l.5-1"></path><line x1="2" y1="2" x2="22" y2="22"></line><path d="M10 5h4l2 3h4a2 2 0 0 1 2 2v7.5"></path></svg>
+                <h3 style={{ color: 'var(--text-muted)', fontFamily: 'monospace' }}>SENSOR LINK OFFLINE</h3>
+                <button onClick={startCamera} style={{ background: 'var(--cta-bg)', color: 'var(--cta-ink)', fontWeight: '800', padding: '0.8rem 2rem', borderRadius: '12px', border: 'none', cursor: 'pointer', marginTop: '1rem', display: 'flex', alignItems: 'center', gap: '10px' }}><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M5 3v18l15-9L5 3z"/></svg>ENGAGE CAMERA SENSOR</button>
               </div>
             )}
           </div>
 
-          <div style={{ padding: '2rem', background: 'linear-gradient(135deg, #0b0f19, #111827)', borderRadius: '18px', border: '1px solid #1f2937' }}>
-            <div style={{ fontSize: '0.8rem', fontFamily: 'monospace', color: '#10b981', fontWeight: '700', textTransform: 'uppercase', marginBottom: '0.75rem' }}>Macro Scene Summary Context</div>
-            <div style={{ fontSize: '1.75rem', fontWeight: '700', color: '#f9fafb' }}>"{aiDescription}"</div>
+          <div style={{ padding: '2rem', background: 'linear-gradient(135deg, var(--surface-3), var(--surface))', borderRadius: '18px', border: '1px solid var(--border)' }}>
+            <div style={{ fontSize: '0.8rem', fontFamily: 'monospace', color: 'var(--success)', fontWeight: '700', textTransform: 'uppercase', marginBottom: '0.75rem' }}>Macro Scene Summary Context</div>
+            <div style={{ fontSize: '1.75rem', fontWeight: '700', color: 'var(--text)' }}>"{aiDescription}"</div>
           </div>
 
-          <div style={{ padding: '1.5rem', background: '#020617', border: '2px solid #1e293b', borderRadius: '18px' }}>
-            <div style={{ fontSize: '0.8rem', fontFamily: 'monospace', color: '#38bdf8', fontWeight: '700', marginBottom: '0.75rem', textTransform: 'uppercase' }}>⚙️ ACTIVE TELEMETRY LOG DISPLAY WINDOW</div>
-            <div style={{ height: '140px', overflowY: 'auto', background: '#030712', borderRadius: '10px', padding: '1rem', fontFamily: 'monospace', fontSize: '0.85rem', color: '#4ade80', lineHeight: '1.6', border: '1px solid #1e293b' }}>
+          <div style={{ padding: '1.5rem', background: 'var(--surface)', border: '2px solid var(--border)', borderRadius: '18px' }}>
+            <div style={{ fontSize: '0.8rem', fontFamily: 'monospace', color: 'var(--heading-accent)', fontWeight: '700', marginBottom: '0.75rem', textTransform: 'uppercase' }}>⚙️ ACTIVE TELEMETRY LOG DISPLAY WINDOW</div>
+            <div style={{ height: '140px', overflowY: 'auto', background: 'var(--surface-2)', borderRadius: '10px', padding: '1rem', fontFamily: 'monospace', fontSize: '0.85rem', color: 'var(--console-text)', lineHeight: '1.6', border: '1px solid var(--border)' }}>
               {debugLogs.map((log, idx) => (
-                <div key={idx} style={{ borderBottom: '1px solid #111827', paddingBottom: '4px', marginBottom: '4px' }}>{log}</div>
+                <div key={idx} style={{ borderBottom: '1px solid var(--border)', paddingBottom: '4px', marginBottom: '4px' }}>{log}</div>
               ))}
             </div>
           </div>
         </section>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-          <aside style={{ background: '#0b0f19', padding: '1.7rem', borderRadius: '18px', border: '1px solid #1f2937' }}>
-            <h2 style={{ fontSize: '1.4rem', fontWeight: '800', borderBottom: '1px solid #1f2937', paddingBottom: '1rem', marginBottom: '1.5rem' }}>YOLO Tracked Targets</h2>
+          <aside style={{ background: 'var(--surface-3)', padding: '1.7rem', borderRadius: '18px', border: '1px solid var(--border)' }}>
+            <h2 style={{ fontSize: '1.4rem', fontWeight: '800', borderBottom: '1px solid var(--border)', paddingBottom: '1rem', marginBottom: '1.5rem' }}>YOLO Tracked Targets</h2>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', maxHeight: '250px', overflowY: 'auto' }}>
                {objects.length === 0 && (
-                <div style={{ color: '#4b5563', textAlign: 'center', padding: '2rem 0', fontFamily: 'monospace' }}>[ NO TARGET OBJECTS REGISTERED ]</div>
+                <div style={{ color: 'var(--text-muted)', textAlign: 'center', padding: '2rem 0', fontFamily: 'monospace' }}>[ NO TARGET OBJECTS REGISTERED ]</div>
               )}
               {objects.map((o, i) => (
-                <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '16px', background: '#111827', padding: '1.2rem', borderRadius: '14px', border: '1px solid #374151' }}>
-                  <div style={{ background: '#0284c7', color: '#fff', fontWeight: '800', padding: '10px', borderRadius: '10px', fontFamily: 'monospace' }}>{(o.position || 'ce').slice(0,2).toUpperCase()}</div>
+                <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '16px', background: 'var(--surface)', padding: '1.2rem', borderRadius: '14px', border: '1px solid var(--border-2)' }}>
+                  <div style={{ background: 'var(--btn-bg)', color: 'var(--btn-ink)', fontWeight: '800', padding: '10px', borderRadius: '10px', fontFamily: 'monospace' }}>{(o.position || 'ce').slice(0,2).toUpperCase()}</div>
                   <div>
                     <div style={{ fontWeight: '700', fontSize: '1.2rem' }}>{o.name}</div>
-                    <div style={{ color: '#f59e0b', fontWeight: '800', fontSize: '0.85rem', marginTop: '4px' }}>{o.steps_away} STEPS AWAY</div>
+                    <div style={{ color: 'var(--warn)', fontWeight: '800', fontSize: '0.85rem', marginTop: '4px' }}>{o.steps_away} STEPS AWAY</div>
                   </div>
                 </div>
               ))}
             </div>
           </aside>
 
-          <aside style={{ background: '#0b0f19', padding: '1.7rem', borderRadius: '18px', border: '1px solid #1f2937' }}>
-            <div style={{ borderBottom: '1px solid #1f2937', paddingBottom: '1rem', marginBottom: '1.5rem' }}>
+          <aside style={{ background: 'var(--surface-3)', padding: '1.7rem', borderRadius: '18px', border: '1px solid var(--border)' }}>
+            <div style={{ borderBottom: '1px solid var(--border)', paddingBottom: '1rem', marginBottom: '1.5rem' }}>
               <h2 style={{ fontSize: '1.4rem', fontWeight: '800' }}>Spatial Weather</h2>
             </div>
-            <div style={{ background: '#111827', padding: '1.2rem', borderRadius: '14px', border: '1px solid #374151', fontFamily: 'monospace', fontSize: '0.95rem' }}>{weatherReport}</div>
+            <div style={{ background: 'var(--surface)', padding: '1.2rem', borderRadius: '14px', border: '1px solid var(--border-2)', fontFamily: 'monospace', fontSize: '0.95rem' }}>{weatherReport}</div>
           </aside>
         </div>
       </main>

@@ -2,6 +2,7 @@ import threading
 import time
 import asyncio
 import os
+import re
 import json
 import urllib.request
 import urllib.parse
@@ -138,20 +139,153 @@ code{background:#1f2937;padding:.15rem .4rem;border-radius:4px}a{color:#a855f7}<
 # ==========================================
 # NAVIGATION ENDPOINTS
 # ==========================================
-@app.get("/api/geocode")
-def geocode_address(query: str):
-    """Converts user destination strings to physical latitude/longitude coordinates securely via OpenStreetMap API."""
+_NUM = r'(-?\d{1,3}(?:\.\d+)?)'
+
+# "10.0150, 76.3280" typed straight into the box
+_PLAIN_COORDS_RE = re.compile(rf'^\s*{_NUM}\s*,\s*{_NUM}\s*$')
+
+# Coordinate sources inside a Google Maps URL, in descending order of trust:
+#   !3d!4d  — the *place's* real coordinates, buried in the data blob
+#   ?q= etc — an explicit coordinate parameter
+#   /@      — only the map viewport centre, which is close but not exact
+_DATA_COORDS_RE   = re.compile(rf'!3d{_NUM}!4d{_NUM}')
+_PARAM_COORDS_RE  = re.compile(rf'[?&](?:q|query|destination|daddr|ll|sll|center|mlat)=(?:loc:)?{_NUM}\s*,\s*{_NUM}')
+_PATH_COORDS_RE   = re.compile(rf'/maps/(?:search|dir|place)/{_NUM},\+?{_NUM}')
+_AT_COORDS_RE     = re.compile(rf'/@{_NUM},{_NUM}')
+
+# Links that name a place but carry no coordinates — fall back to geocoding the name
+_PLACE_NAME_RE  = re.compile(r'/maps/place/([^/@?]+)')
+_SEARCH_NAME_RE = re.compile(r'/maps/search/([^/@?]+)')
+
+_BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36'
+
+
+def _coords_in_range(lat: float, lon: float) -> bool:
+    return -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0
+
+
+def _extract_coords(text: str):
+    """Pull the best available lat/lon out of a Maps URL (or a page body)."""
+    decoded = urllib.parse.unquote(text or "")
+    for pattern in (_DATA_COORDS_RE, _PARAM_COORDS_RE, _PATH_COORDS_RE, _AT_COORDS_RE):
+        match = pattern.search(decoded)
+        if match:
+            lat, lon = float(match.group(1)), float(match.group(2))
+            if _coords_in_range(lat, lon):
+                return lat, lon
+    return None
+
+
+def _extract_place_name(url: str):
+    decoded = urllib.parse.unquote(url or "")
+    for pattern in (_PLACE_NAME_RE, _SEARCH_NAME_RE):
+        match = pattern.search(decoded)
+        if match:
+            name = match.group(1).replace('+', ' ').strip()
+            if name and not _PLAIN_COORDS_RE.match(name):
+                return name
+    return None
+
+
+def _follow_link(url: str):
+    """
+    Short links (maps.app.goo.gl / goo.gl/maps) hold no coordinates themselves —
+    they 302 to a full URL that does. urlopen follows redirects, so geturl() gives
+    us the destination. The browser cannot do this itself: cross-origin fetches to
+    Google are blocked by CORS, which is why this lives on the server.
+    """
+    req = urllib.request.Request(url, headers={'User-Agent': _BROWSER_UA})
+    with urllib.request.urlopen(req, timeout=10) as response:
+        final_url = response.geturl()
+        body = response.read(300_000).decode('utf-8', errors='ignore')
+    return final_url, body
+
+
+def _geocode_free_text(query: str):
+    """Converts a place name to coordinates via OpenStreetMap's Nominatim."""
     try:
         safe_query = urllib.parse.quote(query)
         url = f"https://nominatim.openstreetmap.org/search?q={safe_query}&format=json&limit=1"
         req = urllib.request.Request(url, headers={'User-Agent': 'UnblinderCognitiveConsole/1.0'})
-        with urllib.request.urlopen(req) as response:
+        with urllib.request.urlopen(req, timeout=10) as response:
             data = json.loads(response.read().decode())
         if data:
-            return {"success": True, "lat": float(data[0]["lat"]), "lon": float(data[0]["lon"]), "display_name": data[0]["display_name"]}
+            return {
+                "success": True,
+                "lat": float(data[0]["lat"]),
+                "lon": float(data[0]["lon"]),
+                "display_name": data[0]["display_name"],
+                "source": "place name",
+            }
         return {"success": False, "message": "Location coordinates could not be resolved."}
     except Exception as e:
         return {"success": False, "message": str(e)}
+
+
+@app.get("/api/resolve")
+def resolve_destination(query: str):
+    """
+    Turns whatever the user pasted into coordinates. Accepts:
+      - raw coordinates      "10.0150, 76.3280"
+      - a full Maps URL      google.com/maps/place/.../@10.01,76.32,17z/data=...!3d10.01!4d76.32
+      - a shortened link     maps.app.goo.gl/xxxx  (resolved by following the redirect)
+      - a plain place name   "Lulu Mall Kochi"     (geocoded)
+    """
+    raw = (query or "").strip()
+    if not raw:
+        return {"success": False, "message": "No destination provided."}
+
+    plain = _PLAIN_COORDS_RE.match(raw)
+    if plain:
+        lat, lon = float(plain.group(1)), float(plain.group(2))
+        if not _coords_in_range(lat, lon):
+            return {"success": False, "message": "Those coordinates are outside the valid range."}
+        return {
+            "success": True, "lat": lat, "lon": lon,
+            "display_name": f"Pin at {lat:.5f}, {lon:.5f}",
+            "source": "coordinates",
+        }
+
+    lowered = raw.lower()
+    is_link = lowered.startswith(("http://", "https://")) or "goo.gl" in lowered or "google.com/maps" in lowered
+    if not is_link:
+        return _geocode_free_text(raw)
+
+    # Coordinates sitting in the pasted URL already — no network call needed.
+    found = _extract_coords(raw)
+    if found:
+        return {
+            "success": True, "lat": found[0], "lon": found[1],
+            "display_name": f"Map link · {found[0]:.5f}, {found[1]:.5f}",
+            "source": "map link",
+        }
+
+    # Otherwise it is probably a short link. Follow it and look again.
+    try:
+        final_url, body = _follow_link(raw)
+    except Exception as e:
+        return {"success": False, "message": f"Could not open that map link ({e})."}
+
+    found = _extract_coords(final_url) or _extract_coords(body)
+    if found:
+        return {
+            "success": True, "lat": found[0], "lon": found[1],
+            "display_name": f"Shared pin · {found[0]:.5f}, {found[1]:.5f}",
+            "source": "shortened map link",
+        }
+
+    # The link names a place but hides the coordinates — geocode the name instead.
+    name = _extract_place_name(final_url) or _extract_place_name(raw)
+    if name:
+        return _geocode_free_text(name)
+
+    return {"success": False, "message": "That map link did not contain a location I could read."}
+
+
+@app.get("/api/geocode")
+def geocode_address(query: str):
+    """Kept for compatibility; /api/resolve is the richer entry point."""
+    return _geocode_free_text(query)
 
 
 def _format_maneuver_instruction(maneuver: dict) -> str:
@@ -229,11 +363,31 @@ def get_weather_report(lat: float, lon: float):
 
 
 # ==========================================
-# VOICE ASSISTANT — answers a spoken question, grounded in what the
-# camera can currently see.
+# VOICE ASSISTANT — answers a spoken question, grounded in what the camera can
+# currently see. It also recognizes when the user is asking to be taken
+# somewhere ("take me to the train station") and hands the place name back as
+# an intent, so the frontend can set the destination without any typing.
 # ==========================================
 class AiQuery(BaseModel):
     query: str
+
+
+def _parse_assistant_json(raw: str) -> dict:
+    """The model is asked for JSON, but a stray prose reply shouldn't break the
+    assistant — fall back to treating whatever came back as a plain answer."""
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return {"intent": "answer", "destination": None, "response": raw}
+
+    intent = data.get("intent")
+    destination = data.get("destination")
+    response = (data.get("response") or "").strip()
+
+    if intent != "navigate" or not isinstance(destination, str) or not destination.strip():
+        return {"intent": "answer", "destination": None, "response": response or raw}
+
+    return {"intent": "navigate", "destination": destination.strip(), "response": response}
 
 
 @app.post("/api/ai_assist")
@@ -251,28 +405,49 @@ def ai_assist(payload: AiQuery):
         seen = "nothing detected right now"
 
     prompt = (
-        "You are a voice assistant for a blind user who is listening through text-to-speech. "
-        "Answer their question in 1 to 3 short sentences, under 50 words. Speak plainly and warmly, "
-        "in second person. Never use markdown, bullet points, or asterisks.\n"
-        "If the question is about their surroundings, answer using only the camera data below; "
-        "do not invent objects that are not listed. If the question is general knowledge, "
-        "just answer it normally.\n\n"
+        "You are a voice assistant for a blind pedestrian who is listening through text-to-speech.\n\n"
+        "First decide what they want:\n"
+        "- If they are asking to travel or walk somewhere, or to set/change a destination "
+        "(for example 'take me to the train station', 'navigate to MG Road', 'I want to go to "
+        "the nearest pharmacy'), the intent is navigate. Put the place exactly as they named it "
+        "in destination.\n"
+        "- Anything else — questions about their surroundings, or general questions — is the "
+        "answer intent, with destination null.\n\n"
+        "Reply with JSON only, in this shape:\n"
+        '{"intent": "navigate" | "answer", "destination": string | null, "response": string}\n\n'
+        "The response field is what gets spoken aloud. Keep it under 40 words, 1 to 3 short "
+        "sentences, second person, plain and warm. No markdown, bullets, or asterisks. "
+        "For a navigate intent, simply confirm where you are taking them, for example "
+        "'Setting a route to the train station now.' Do not state distances or directions — "
+        "the app supplies those itself.\n"
+        "For questions about their surroundings, use only the camera data below; never invent "
+        "objects that are not listed.\n\n"
         f"What the camera sees right now: {seen}\n"
         f"Scene summary: {scene}\n\n"
-        f"Their question: {payload.query}"
+        f"What they said: {payload.query}"
     )
 
     try:
         completion = groq_client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
             model="llama-3.1-8b-instant",
-            temperature=0.4,
-            max_tokens=120,
+            temperature=0.3,
+            max_tokens=160,
+            response_format={"type": "json_object"},
         )
-        text = completion.choices[0].message.content.strip().replace("*", "").replace("#", "")
-        if not text:
+        raw = completion.choices[0].message.content.strip()
+        parsed = _parse_assistant_json(raw)
+
+        response = parsed["response"].replace("*", "").replace("#", "").strip()
+        if not response:
             return {"success": False, "message": "Empty response from AI reasoning engine."}
-        return {"success": True, "response": text}
+
+        return {
+            "success": True,
+            "response": response,
+            "intent": parsed["intent"],
+            "destination": parsed["destination"],
+        }
     except Exception as e:
         return {"success": False, "message": str(e)}
 

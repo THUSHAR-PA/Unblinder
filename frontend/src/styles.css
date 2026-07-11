@@ -1,48 +1,136 @@
-:root{
-	--bg:#0f1724;
-	--card:#0b1220;
-	--muted:#9aa4b2;
-	--accent:#3b82f6;
+/* ==========================================================
+   THEME TOKENS
+   Every colour in the app — CSS and inline styles alike — resolves through
+   one of these. Flipping data-theme on <html> repaints the whole console,
+   so no component holds a colour of its own.
+
+   Contrast note: text tokens are checked against the surface they sit on.
+   --text-muted on --surface is the lowest pair, and it clears WCAG AA.
+   ========================================================== */
+:root,
+:root[data-theme="light"]{
+	/* sky blue + white */
+	--surface:#ffffff;          /* cards */
+	--surface-2:#f8fbff;        /* inset / console bed */
+	--surface-3:#eaf4ff;        /* tinted section */
+	--border:#d6e9f8;
+	--border-2:#cfe3f5;
+	--border-strong:#a8cfeb;
+
+	--text:#0f2942;             /* 13.4:1 on white */
+	--text-muted:#4d6b8a;       /* 5.9:1 on white  */
+	--text-faint:#7d97b1;       /* icons/dividers, non-essential */
+
+	--accent:#0284c7;           /* borders, glows, non-text uses */
+	--accent-2:#0ea5e9;
+
+	/* Buttons carry text, so they need a darker blue than the accent:
+	   white on #0ea5e9 is only 2.6:1 and on #0284c7 is 4.0:1 — both under AA.
+	   #0369a1 gets white to 5.5:1. */
+	--btn-bg:#0369a1;
+	--btn-ink:#ffffff;
+	--cta-bg:#0369a1;
+	--cta-ink:#ffffff;
+
+	--heading-accent:#0369a1;   /* 5.6:1 on white */
+	--console-text:#0b5578;     /* 7.0:1 on the console bed */
+	--success:#047857;
+	--warn:#b45309;
+
+	--video-bed:#0f2942;
+	--title-a:#0f2942;
+	--title-b:#0284c7;
+
+	--page-top:#eaf4ff;
+	--page-bottom:#f7fbff;
+	--theme-track:#e6f3fd;
+
 	/* condensed grotesque for the panel display type — swap this one line to re-face it */
 	--ub-display: 'Bahnschrift', 'Archivo Narrow', 'Roboto Condensed', 'Oswald', 'Arial Narrow', 'Helvetica Neue', sans-serif;
 }
-body{ font-family: 'Inter', system-ui, -apple-system, Roboto, 'Segoe UI', Arial; margin:0; padding:0; background: linear-gradient(180deg,#071022 0%, #071528 100%); color:#e6eef8 }
+
+:root[data-theme="dark"]{
+	--surface:#111827;
+	--surface-2:#030712;
+	--surface-3:#0b0f19;
+	--border:#1f2937;
+	--border-2:#374151;
+	--border-strong:#4b5563;
+
+	--text:#f9fafb;
+	--text-muted:#9ca3af;
+	--text-faint:#6b7280;
+
+	--accent:#0284c7;
+	--accent-2:#10b981;
+
+	--btn-bg:#0369a1;           /* not #0284c7: white on that is only 4.1:1 */
+	--btn-ink:#ffffff;
+	--cta-bg:#10b981;
+	--cta-ink:#022c22;          /* dark ink on the green CTA */
+
+	--heading-accent:#38bdf8;
+	--console-text:#4ade80;
+	--success:#10b981;
+	--warn:#f59e0b;
+
+	--video-bed:#000000;
+	--title-a:#ffffff;
+	--title-b:#cbd5e1;
+
+	--page-top:#071022;
+	--page-bottom:#071528;
+	--theme-track:#0b1220;
+}
+
+body{
+	font-family: 'Inter', system-ui, -apple-system, Roboto, 'Segoe UI', Arial;
+	margin:0; padding:0;
+	background: linear-gradient(180deg, var(--page-top) 0%, var(--page-bottom) 100%);
+	color:var(--text);
+	transition: background .4s ease, color .4s ease;
+}
 .container{ max-width:1200px; margin:12px auto }
-.container header{ display:flex; align-items:center; justify-content:space-between; background: linear-gradient(90deg, rgba(255,255,255,0.02), transparent); padding:14px 18px; border-radius:12px }
+.container header{ display:flex; align-items:center; justify-content:space-between; background: linear-gradient(90deg, rgba(2,132,199,0.06), transparent); padding:14px 18px; border-radius:12px }
 .container header h1{ margin:0; font-size:20px; letter-spacing:0.2px }
-.container header p{ margin:0; color:var(--muted); font-size:13px }
+.container header p{ margin:0; color:var(--text-muted); font-size:13px }
 .controls{ display:flex; gap:10px; align-items:center }
-.controls button{ background:transparent; color:var(--accent); border:1px solid rgba(59,130,246,0.18); padding:8px 12px; border-radius:10px; cursor:pointer; transition: all .18s ease }
-.controls button:hover{ transform:translateY(-2px); box-shadow: 0 8px 24px rgba(59,130,246,0.08) }
-.controls .status{ color:var(--muted); font-size:13px; margin-left:6px }
+.controls button{ background:transparent; color:var(--accent); border:1px solid rgba(2,132,199,0.28); padding:8px 12px; border-radius:10px; cursor:pointer; transition: all .18s ease }
+.controls button:hover{ transform:translateY(-2px); box-shadow: 0 8px 24px rgba(2,132,199,0.16) }
+.controls .status{ color:var(--text-muted); font-size:13px; margin-left:6px }
 main{ display:grid; grid-template-columns: 1fr 360px; gap:20px; padding:18px; height: calc(100vh - 120px); box-sizing:border-box }
-.video{ background: linear-gradient(180deg, rgba(255,255,255,0.01), rgba(255,255,255,0.005)); border-radius:12px; padding:12px; display:flex; align-items:center; justify-content:center; position:relative }
+.video{ background: var(--surface); border:1px solid var(--border); border-radius:12px; padding:12px; display:flex; align-items:center; justify-content:center; position:relative }
 .video-wrap{ position:relative; width:100%; height:100%; display:flex; align-items:center; justify-content:center }
-.video-wrap img{ width:100%; height:100%; object-fit:contain; border-radius:10px; box-shadow: 0 10px 40px rgba(2,6,23,0.6); background:#000; transition: transform .2s ease }
+/* the feed itself keeps a dark bed — camera letterboxing reads better against it */
+.video-wrap img{ width:100%; height:100%; object-fit:contain; border-radius:10px; box-shadow: 0 10px 40px rgba(15,41,66,0.18); background:var(--video-bed); transition: transform .2s ease }
 .video-wrap img:active{ transform:scale(.998) }
 .overlay{ position:absolute; left:16px; top:16px; display:flex; gap:8px; align-items:center }
-.live-dot{ width:10px; height:10px; border-radius:50%; background: #22c55e; box-shadow: 0 6px 18px rgba(34,197,94,0.12); animation: pulse 1.6s infinite }
+.live-dot{ width:10px; height:10px; border-radius:50%; background: #22c55e; box-shadow: 0 6px 18px rgba(34,197,94,0.35); animation: pulse 1.6s infinite }
 @keyframes pulse{ 0%{ transform:scale(.9); opacity:.9 } 70%{ transform:scale(1.2); opacity:.6 } 100%{ transform:scale(.9); opacity:.9 } }
-.det-count{ background: rgba(0,0,0,0.45); padding:6px 12px; border-radius:999px; color:#fff; font-weight:700; font-size:13px }
-.sidebar{ background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)); padding:16px; border-radius:12px; border:1px solid rgba(255,255,255,0.03); overflow:auto; display:flex; flex-direction:column }
+.det-count{ background: rgba(15,41,66,0.75); padding:6px 12px; border-radius:999px; color:#fff; font-weight:700; font-size:13px }
+.sidebar{ background: var(--surface); padding:16px; border-radius:12px; border:1px solid var(--border); overflow:auto; display:flex; flex-direction:column; box-shadow: 0 6px 22px -14px rgba(15,41,66,.28) }
 .sidebar h2{ margin:0 0 8px 0 }
-.sidebar .subtitle{ color:var(--muted); font-size:13px; margin-bottom:10px }
+.sidebar .subtitle{ color:var(--text-muted); font-size:13px; margin-bottom:10px }
 .det-list{ display:grid; grid-template-columns:1fr; gap:10px; overflow:auto }
-.det-item{ display:flex; gap:12px; align-items:center; background: linear-gradient(90deg, rgba(255,255,255,0.01), rgba(255,255,255,0.005)); padding:10px; border-radius:10px; transition: transform .12s ease, box-shadow .12s ease }
-.det-item:hover{ transform:translateY(-4px); box-shadow: 0 14px 40px rgba(2,6,23,0.6) }
-.avatar{ width:44px; height:44px; border-radius:10px; display:flex; align-items:center; justify-content:center; color:#071022; font-weight:700; background: linear-gradient(135deg, rgba(59,130,246,0.9), rgba(96,165,250,0.9)) }
+.det-item{ display:flex; gap:12px; align-items:center; background:var(--surface-2); border:1px solid var(--border); padding:10px; border-radius:10px; transition: transform .12s ease, box-shadow .12s ease }
+.det-item:hover{ transform:translateY(-4px); box-shadow: 0 14px 34px -18px rgba(15,41,66,.45) }
+.avatar{ width:44px; height:44px; border-radius:10px; display:flex; align-items:center; justify-content:center; color:#ffffff; font-weight:700; background: linear-gradient(135deg, #0284c7, #38bdf8) }
 .det-name{ flex:1; font-weight:700 }
 .det-meta{ display:flex; gap:8px; align-items:center }
-.det-conf{ color:var(--muted); font-size:13px; min-width:44px; text-align:right }
-.det-bar{ width:110px; height:8px; background:rgba(255,255,255,0.04); border-radius:999px; overflow:hidden }
-.det-fill{ height:100%; background:linear-gradient(90deg,var(--accent),#60a5fa); transition: width .4s cubic-bezier(.2,.9,.2,1) }
-.empty{ color:var(--muted); padding:8px }
+.det-conf{ color:var(--text-muted); font-size:13px; min-width:44px; text-align:right }
+.det-bar{ width:110px; height:8px; background:rgba(15,41,66,0.08); border-radius:999px; overflow:hidden }
+.det-fill{ height:100%; background:linear-gradient(90deg,var(--accent),#38bdf8); transition: width .4s cubic-bezier(.2,.9,.2,1) }
+.empty{ color:var(--text-muted); padding:8px }
 
 /* ==========================================================
    PRIMARY ACTION SPLIT ACCORDION
    Panels expand on hover AND keyboard focus; a click always
    fires the action immediately. Expansion is presentation
    only — it is never a step the user must pass through.
+
+   The panels stay deep-toned on a white page: they are the one
+   saturated element, and white type on them beats dark type on
+   pale tint for both contrast and hierarchy.
    ========================================================== */
 .ub-split{
 	display:flex;
@@ -50,9 +138,9 @@ main{ display:grid; grid-template-columns: 1fr 360px; gap:20px; padding:18px; he
 	height:290px;
 	border-radius:20px;
 	overflow:hidden;
-	border:1px solid #1f2937;
-	background:#05070d;
-	box-shadow: 0 26px 64px -22px rgba(0,0,0,.9), inset 0 1px 0 rgba(255,255,255,.05);
+	border:1px solid var(--border);
+	background:var(--surface);
+	box-shadow: 0 26px 60px -30px rgba(15,41,66,.45), inset 0 1px 0 rgba(255,255,255,.05);
 }
 
 .ub-panel{
@@ -72,7 +160,7 @@ main{ display:grid; grid-template-columns: 1fr 360px; gap:20px; padding:18px; he
 	color:#fff;
 	background:
 		radial-gradient(130% 90% at 50% 0%, var(--ub-soft) 0%, transparent 62%),
-		linear-gradient(165deg, var(--ub-base) 0%, #070a12 80%);
+		linear-gradient(165deg, var(--ub-base) 0%, #062033 80%);
 	transition: flex .55s cubic-bezier(.22,1,.36,1), filter .35s ease;
 }
 .ub-panel:first-child{ border-left:0 }
@@ -216,14 +304,14 @@ main{ display:grid; grid-template-columns: 1fr 360px; gap:20px; padding:18px; he
    --ub-underline so destructive actions stay red.
    ========================================================== */
 .ub-link-btn{
-	--ub-u-hot:  #c7d2fe;   /* bright core, at the centre */
-	--ub-u-edge: #6366f1;   /* accent, fading out toward the tips */
+	--ub-u-hot:  #7dd3fc;   /* bright core, at the centre */
+	--ub-u-edge: #0284c7;   /* accent, fading out toward the tips */
 	position:relative;
 	display:inline-flex; align-items:center; justify-content:center;
 	padding:.5rem .55rem .72rem;
 	background:transparent; border:0;
 	cursor:pointer;
-	color:#9ca3af;
+	color:var(--text-muted);
 	font-family:inherit;
 	font-size:.78rem; font-weight:800; letter-spacing:.1em; text-transform:uppercase;
 	white-space:nowrap;
@@ -255,14 +343,14 @@ main{ display:grid; grid-template-columns: 1fr 360px; gap:20px; padding:18px; he
 	background: linear-gradient(90deg, var(--ub-u-hot) 0%, var(--ub-u-edge) 74%, transparent 100%);
 }
 
-.ub-link-btn:hover, .ub-link-btn:focus-visible{ color:#fff; transform: translateY(-1px) }
+.ub-link-btn:hover, .ub-link-btn:focus-visible{ color:var(--text); transform: translateY(-1px) }
 .ub-link-btn:hover::before, .ub-link-btn:focus-visible::before,
 .ub-link-btn:hover::after,  .ub-link-btn:focus-visible::after{ transform: scaleX(1) }
 .ub-link-btn:focus-visible{ outline:none }
 .ub-link-btn:active{ transform: translateY(0) }
 
 .ub-link-btn.is-danger{ --ub-u-hot:#fecdd3; --ub-u-edge:#ef4444 }
-.ub-link-btn.is-go{     --ub-u-hot:#a7f3d0; --ub-u-edge:#10b981 }
+.ub-link-btn.is-go{     --ub-u-hot:#7dd3fc; --ub-u-edge:#0ea5e9 }
 
 @media (prefers-reduced-motion: reduce){
 	.ub-link-btn, .ub-link-btn::before, .ub-link-btn::after{ transition:none !important }
@@ -283,17 +371,17 @@ main{ display:grid; grid-template-columns: 1fr 360px; gap:20px; padding:18px; he
    SPEECH SWITCH
    Adapted from the Uiverse checkbox switch: same mechanic (a square
    knob sliding across a track, red when off / green when on) but on a
-   dark inset track so it sits in the console rather than on top of it.
+   pale inset track so it sits in the console rather than on top of it.
    The whole label is clickable, so the icon and text toggle it too.
    ========================================================== */
 .ub-speech{
 	--ub-sw-tint:#ef4444;
 	display:inline-flex; align-items:center; gap:.7rem;
 	margin-right:10px; padding-right:20px;
-	border-right:1px solid #374151;
+	border-right:1px solid var(--border);
 	cursor:pointer; user-select:none;
 }
-.ub-speech.is-on{ --ub-sw-tint:#10b981 }
+.ub-speech.is-on{ --ub-sw-tint:#0ea5e9 }
 
 .ub-speech-icon{ display:flex; color: var(--ub-sw-tint); transition: color .3s ease }
 .ub-speech-icon svg{ width:18px; height:18px; display:block }
@@ -309,16 +397,16 @@ main{ display:grid; grid-template-columns: 1fr 360px; gap:20px; padding:18px; he
 
 .ub-switch{
 	--false:#ef4444;
-	--true:#10b981;
+	--true:#0ea5e9;
 	appearance:none; -webkit-appearance:none;
 	box-sizing:border-box;
 	margin:0;
 	position:relative;
 	height:1.85rem; width:3.35rem;
 	border-radius:.55rem;
-	background:#0b1220;
-	border:1px solid #2b3648;
-	box-shadow: inset 0 2px 7px rgba(0,0,0,.7);
+	background:var(--theme-track);
+	border:1px solid var(--border-strong);
+	box-shadow: inset 0 2px 6px rgba(15,41,66,.16);
 	cursor:pointer;
 	transition: border-color .3s ease, box-shadow .3s ease;
 }
@@ -339,13 +427,66 @@ main{ display:grid; grid-template-columns: 1fr 360px; gap:20px; padding:18px; he
 	transform: translateY(-50%) translateX(calc(1.44rem - 2px));
 }
 .ub-switch:checked{
-	border-color: rgba(16,185,129,.4);
-	box-shadow: inset 0 2px 7px rgba(0,0,0,.65), 0 0 0 1px rgba(16,185,129,.12);
+	border-color: rgba(14,165,233,.5);
+	box-shadow: inset 0 2px 6px rgba(15,41,66,.14), 0 0 0 1px rgba(14,165,233,.18);
 }
-.ub-switch:focus-visible{ outline:2px solid #fff; outline-offset:2px }
+.ub-switch:focus-visible{ outline:2px solid #0284c7; outline-offset:2px }
 
 @media (prefers-reduced-motion: reduce){
 	.ub-switch::before, .ub-speech-icon, .ub-speech-text{ transition:none !important }
 }
 
+/* ==========================================================
+   THEME TOGGLE
+   A gradient thumb glides between a sun and a moon. Both icons stay
+   visible — the thumb tells you which one is live, so the control shows
+   its current state rather than only the action it would perform.
+   ========================================================== */
+.ub-theme{
+	position:relative;
+	display:inline-flex; align-items:center;
+	width:68px; height:32px;
+	padding:3px;
+	border-radius:999px;
+	border:1px solid var(--border-strong);
+	background: var(--theme-track);
+	box-shadow: inset 0 2px 6px rgba(15,41,66,.14);
+	cursor:pointer;
+	transition: background .4s ease, border-color .4s ease, transform .25s cubic-bezier(.22,1,.36,1), box-shadow .3s ease;
+}
+.ub-theme:hover{
+	transform: translateY(-1px);
+	box-shadow: inset 0 2px 6px rgba(15,41,66,.14), 0 8px 20px -8px var(--accent);
+}
+.ub-theme:active{ transform: translateY(0) }
+.ub-theme:focus-visible{ outline:2px solid var(--accent); outline-offset:2px }
 
+.ub-theme-thumb{
+	position:absolute; top:3px; left:3px;
+	width:30px; height:24px;
+	border-radius:999px;
+	background: linear-gradient(135deg, #38bdf8, #0284c7);
+	box-shadow: 0 4px 14px -4px rgba(2,132,199,.85), inset 0 1px 0 rgba(255,255,255,.45);
+	transition: transform .45s cubic-bezier(.22,1,.36,1), background .4s ease;
+}
+/* track 68 − 2×1 border − 2×3 pad = 60 usable; thumb 30 ⇒ travel 30 */
+.ub-theme.is-dark .ub-theme-thumb{
+	transform: translateX(30px);
+	background: linear-gradient(135deg, #6366f1, #1e2a5e);
+	box-shadow: 0 4px 14px -4px rgba(99,102,241,.85), inset 0 1px 0 rgba(255,255,255,.3);
+}
+
+.ub-theme-ico{
+	position:relative; z-index:1;
+	display:flex; align-items:center; justify-content:center;
+	width:30px; height:24px;
+	color: var(--text-faint);
+	transition: color .35s ease, transform .45s cubic-bezier(.22,1,.36,1);
+}
+.ub-theme-ico svg{ width:15px; height:15px; display:block }
+.ub-theme:not(.is-dark) .ub-theme-ico.is-sun{ color:#ffffff; transform: rotate(45deg) }
+.ub-theme.is-dark .ub-theme-ico.is-moon{ color:#ffffff }
+
+@media (prefers-reduced-motion: reduce){
+	.ub-theme, .ub-theme-thumb, .ub-theme-ico{ transition:none !important }
+}
