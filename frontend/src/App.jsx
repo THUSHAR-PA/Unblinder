@@ -1,0 +1,1006 @@
+import React, { useEffect, useState, useRef } from 'react'
+import { MapContainer, TileLayer, Marker, Polyline, useMap } from 'react-leaflet'
+import 'leaflet/dist/leaflet.css'
+import L from 'leaflet'
+
+// ==========================================
+// PANEL ICONS — inline stroke SVGs. They take their colour from the
+// panel's accent via currentColor, so there is nothing to re-theme.
+// ==========================================
+const svgBase = {
+  viewBox: '0 0 24 24',
+  fill: 'none',
+  stroke: 'currentColor',
+  strokeWidth: 1.7,
+  strokeLinecap: 'round',
+  strokeLinejoin: 'round',
+  focusable: 'false',
+}
+
+const IconCompass = () => (
+  <svg {...svgBase}>
+    <circle cx="12" cy="12" r="9.5" />
+    <path d="M16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88Z" />
+  </svg>
+)
+
+const IconScan = () => (
+  <svg {...svgBase}>
+    <path d="M3 7V5a2 2 0 0 1 2-2h2" />
+    <path d="M17 3h2a2 2 0 0 1 2 2v2" />
+    <path d="M21 17v2a2 2 0 0 1-2 2h-2" />
+    <path d="M7 21H5a2 2 0 0 1-2-2v-2" />
+    <path d="M18.94 12.33a1 1 0 0 0 0-.66 7.5 7.5 0 0 0-13.88 0 1 1 0 0 0 0 .66 7.5 7.5 0 0 0 13.88 0" />
+    <circle cx="12" cy="12" r="1.6" />
+  </svg>
+)
+
+const IconWeather = () => (
+  <svg {...svgBase}>
+    <path d="M12 2v2" />
+    <path d="m4.93 4.93 1.41 1.41" />
+    <path d="M20 12h2" />
+    <path d="m19.07 4.93-1.41 1.41" />
+    <path d="M15.95 12.65a4 4 0 0 0-5.93-4.13" />
+    <path d="M13 22H7a5 5 0 1 1 4.9-6H13a3 3 0 0 1 0 6Z" />
+    <path d="M11 20v2" />
+    <path d="M7 19v2" />
+  </svg>
+)
+
+const IconSparkle = () => (
+  <svg {...svgBase}>
+    <path d="M12 2.5 13.9 9a3.2 3.2 0 0 0 2.1 2.1L22.5 13l-6.5 1.9a3.2 3.2 0 0 0-2.1 2.1L12 23.5l-1.9-6.5A3.2 3.2 0 0 0 8 14.9L1.5 13 8 11.1A3.2 3.2 0 0 0 10.1 9Z" />
+  </svg>
+)
+
+const IconMic = () => (
+  <svg {...svgBase}>
+    <rect x="9" y="2" width="6" height="12" rx="3" />
+    <path d="M19 11v1a7 7 0 0 1-14 0v-1" />
+    <path d="M12 19v3" />
+  </svg>
+)
+
+const IconVolume = () => (
+  <svg {...svgBase}>
+    <path d="M11 5 6 9H2v6h4l5 4V5Z" />
+    <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+    <path d="M18.36 5.64a9 9 0 0 1 0 12.73" />
+  </svg>
+)
+
+const IconVolumeOff = () => (
+  <svg {...svgBase}>
+    <path d="M11 5 6 9H2v6h4l5 4V5Z" />
+    <path d="m22 9-6 6" />
+    <path d="m16 9 6 6" />
+  </svg>
+)
+
+// ==========================================
+// CUSTOM MAP ICONS (Bypasses default Leaflet image bugs)
+// ==========================================
+const userIcon = new L.DivIcon({
+  className: 'custom-user-icon',
+  html: `<div style="background-color: #06b6d4; width: 18px; height: 18px; border-radius: 50%; border: 3px solid white; box-shadow: 0 0 15px #06b6d4;"></div>`,
+  iconSize: [18, 18],
+  iconAnchor: [9, 9]
+});
+
+const checkpointIcon = new L.DivIcon({
+  className: 'custom-checkpoint-icon',
+  html: `<div style="background-color: #ef4444; width: 16px; height: 16px; border-radius: 50%; border: 3px solid white; box-shadow: 0 0 12px #ef4444;"></div>`,
+  iconSize: [16, 16],
+  iconAnchor: [8, 8]
+});
+
+// Helper component to smoothly pan map to user as they walk
+function RecenterMap({ lat, lng }) {
+  const map = useMap();
+  useEffect(() => {
+    if (lat && lng) {
+      map.setView([lat, lng], map.getZoom(), { animate: true });
+    }
+  }, [lat, lng, map]);
+  return null;
+}
+
+// ==========================================
+// SPEECH PRIORITY ENGINE
+// ==========================================
+class SpeechQueueManager {
+  constructor() {
+    this.queue = []
+    this.isPlaying = false
+    this.currentItem = null
+    this.currentPriority = null
+    this.activeToken = 0
+    this.explicitCompleteCallback = null
+    this.listeners = new Set()
+    this.isAmbientSuppressed = false // System override to suppress background tracking chatter
+  }
+
+  subscribe(fn) {
+    this.listeners.add(fn)
+    fn(this._state())
+    return () => this.listeners.delete(fn)
+  }
+
+  _state() {
+    return { isPlaying: this.isPlaying, priority: this.currentPriority }
+  }
+
+  _notify() {
+    this.listeners.forEach((fn) => fn(this._state()))
+  }
+
+  speakAmbient(text, speed, voiceEnabledRef) {
+    if (!voiceEnabledRef || !voiceEnabledRef.current) return
+    if (this.currentPriority === 'explicit' || this.isAmbientSuppressed) return 
+    if (!text || !text.trim()) return
+    const alreadyQueued = this.queue.some((i) => i.text === text)
+    const currentlyPlaying = this.currentItem && this.currentItem.text === text
+    if (alreadyQueued || currentlyPlaying) return
+    this.queue.push({ text, speed, priority: 'ambient' })
+    this._pump()
+  }
+
+  speakExplicit(texts, speed, voiceEnabledRef, onComplete) {
+    const list = (Array.isArray(texts) ? texts : [texts]).filter((t) => t && t.trim())
+
+    this.activeToken += 1
+    window.speechSynthesis.cancel()
+    this.isPlaying = false
+    this.currentItem = null
+    this.queue = []
+    this.explicitCompleteCallback = onComplete || null
+
+    if (!voiceEnabledRef || !voiceEnabledRef.current || list.length === 0) {
+      this.currentPriority = null
+      this._notify()
+      this._resolveExplicitComplete()
+      return
+    }
+
+    this.currentPriority = 'explicit'
+    this.queue = list.map((text) => ({ text, speed, priority: 'explicit' }))
+    this._notify()
+    this._pump()
+  }
+
+  _resolveExplicitComplete() {
+    if (this.explicitCompleteCallback) {
+      const cb = this.explicitCompleteCallback
+      this.explicitCompleteCallback = null
+      cb()
+    }
+  }
+
+  _pump() {
+    if (this.isPlaying) return
+    if (this.queue.length === 0) {
+      if (this.currentPriority === 'explicit') {
+        this.currentPriority = null
+        this._notify()
+        this._resolveExplicitComplete()
+      }
+      return
+    }
+
+    const item = this.queue.shift()
+    const myToken = this.activeToken
+    this.isPlaying = true
+    this.currentItem = item
+    this.currentPriority = item.priority
+    this._notify()
+
+    const utterance = new SpeechSynthesisUtterance(item.text)
+    utterance.rate = item.speed
+    const voices = window.speechSynthesis.getVoices()
+    if (voices.length > 0) {
+      utterance.voice = voices.find((v) => v.localService) || voices[0]
+    }
+
+    const finish = () => {
+      if (myToken !== this.activeToken) return 
+      this.isPlaying = false
+      this.currentItem = null
+      this._pump()
+    }
+    utterance.onend = finish
+    utterance.onerror = finish
+    window.speechSynthesis.speak(utterance)
+  }
+
+  clearAll() {
+    this.activeToken += 1
+    this.queue = []
+    window.speechSynthesis.cancel()
+    this.isPlaying = false
+    this.currentItem = null
+    this.currentPriority = null
+    this._notify()
+    this._resolveExplicitComplete()
+  }
+}
+
+const audioQueue = new SpeechQueueManager()
+
+// ==========================================
+// SPATIAL GEOMETRY MATHEMATICAL COMPUTATIONS
+// ==========================================
+function computeHaversineDistance(lat1, lon1, lat2, lon2) {
+  const R = 6371000
+  const dLat = (lat2 - lat1) * Math.PI / 180
+  const dLon = (lon2 - lon1) * Math.PI / 180
+  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) * Math.sin(dLon / 2)
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+  return R * c
+}
+
+function computeTargetBearing(lat1, lon1, lat2, lon2) {
+  const dLon = (lon2 - lon1) * Math.PI / 180
+  const lat1Rad = lat1 * Math.PI / 180
+  const lat2Rad = lat2 * Math.PI / 180
+  const y = Math.sin(dLon) * Math.cos(lat2Rad)
+  const x = Math.cos(lat1Rad) * Math.sin(lat2Rad) - Math.sin(lat1Rad) * Math.cos(lat2Rad) * Math.cos(dLon)
+  const brng = Math.atan2(y, x) * 180 / Math.PI
+  return (brng + 360) % 360
+}
+
+function computeTurnDirection(angleDiff) {
+  if (Math.abs(angleDiff) <= 20) return 'straight'
+  return angleDiff > 0 ? 'right' : 'left'
+}
+
+function normalizeAngleDiff(bearing, heading) {
+  let diff = bearing - heading
+  if (diff > 180) diff -= 360
+  if (diff < -180) diff += 360
+  return diff
+}
+
+function buildObjectsNarration(objs) {
+  if (!objs || objs.length === 0) return "No objects currently detected in view."
+  const sorted = [...objs].sort((a, b) => (a.steps_away ?? 99) - (b.steps_away ?? 99))
+  const top = sorted.slice(0, 6)
+  const parts = top.map((o) => {
+    const where = o.position === 'center' ? 'ahead' : `to your ${o.position}`
+    return `${o.name}, ${o.steps_away} steps ${where}`
+  })
+  const remaining = objs.length - top.length
+  const countNote = remaining > 0 ? ` and ${remaining} more object${remaining > 1 ? 's' : ''} further out` : ''
+  return `${top.length} object${top.length > 1 ? 's' : ''} detected. ${parts.join('. ')}${countNote}.`
+}
+
+function buildFallbackGuidance(targetNode, distanceMeters, turnDirection, angleDiff, checkpointsRemaining) {
+  const turnPhrase = turnDirection === 'straight'
+    ? 'Continue straight ahead'
+    : `Turn ${turnDirection}, about ${Math.round(Math.abs(angleDiff))} degrees`
+  const steps = Math.round(distanceMeters / 0.75)
+  const remainderNote = checkpointsRemaining > 1 ? ` ${checkpointsRemaining - 1} more turn${checkpointsRemaining - 1 > 1 ? 's' : ''} after this one.` : ' This is the final turn.'
+  return `${turnPhrase}. Next checkpoint is ${Math.round(distanceMeters)} meters ahead, about ${steps} steps. Action: ${targetNode.instruction} onto ${targetNode.name}.${remainderNote}`
+}
+
+export default function App() {
+  const [objects, setObjects] = useState([])
+  const [aiDescription, setAiDescription] = useState("Initializing environment orientation...")
+  const [voiceEnabled, setVoiceEnabled] = useState(true)
+  const [running, setRunning] = useState(true)
+  const [weatherReport, setWeatherReport] = useState("Standby for environmental telemetry...")
+  const [fps, setFps] = useState(0)
+
+  // NAVIGATION AND TELEMETRY STATES
+  const [destinationInput, setDestinationInput] = useState("")
+  const [startInput, setStartInput] = useState("My Live GPS Tracking Coords")
+  const [isNavigating, setIsNavigating] = useState(false)
+  const [navRouteData, setNavRouteData] = useState(null)
+  const [currentPosition, setCurrentPosition] = useState(null)
+  const [deviceHeading, setDeviceHeading] = useState(0)
+  const [debugLogs, setDebugLogs] = useState(["[Console Bootup Complete] Waiting for coordinates input..."])
+
+  const [activeAction, setActiveAction] = useState(null) 
+  const [speechState, setSpeechState] = useState({ isPlaying: false, priority: null })
+  
+  // VOICE RECOGNITION (AI ASSISTANT) STATE
+  const [isListening, setIsListening] = useState(false)
+  const recognitionRef = useRef(null)
+  const aiPhaseRef = useRef('idle') // Tracks 'idle' | 'listening' | 'processing'
+
+  const wsRef = useRef(null)
+  const msgCountRef = useRef(0)
+  const imgRef = useRef(null)
+  const spokenObjectsCooldownRef = useRef({})
+  const actionIdRef = useRef(0)
+
+  const voiceEnabledRef = useRef(voiceEnabled)
+  const runningRef = useRef(running)
+  const aiDescRef = useRef(aiDescription)
+  const objectsRef = useRef(objects)
+  const currentPositionRef = useRef(currentPosition)
+  const deviceHeadingRef = useRef(deviceHeading)
+  const navRouteDataRef = useRef(navRouteData)
+
+  useEffect(() => { voiceEnabledRef.current = voiceEnabled }, [voiceEnabled])
+  useEffect(() => { runningRef.current = running }, [running])
+  useEffect(() => { aiDescRef.current = aiDescription }, [aiDescription])
+  useEffect(() => { objectsRef.current = objects }, [objects])
+  useEffect(() => { currentPositionRef.current = currentPosition }, [currentPosition])
+  useEffect(() => { deviceHeadingRef.current = deviceHeading }, [deviceHeading])
+  useEffect(() => { navRouteDataRef.current = navRouteData }, [navRouteData])
+
+  useEffect(() => {
+    const unsubscribe = audioQueue.subscribe(setSpeechState)
+    return unsubscribe
+  }, [])
+
+  const BACKEND = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000'
+
+  function logToConsole(message) {
+    const stamp = new Date().toLocaleTimeString()
+    setDebugLogs((prev) => [`[${stamp}] ${message}`, ...prev.slice(0, 49)])
+  }
+
+  function beginAction(name) {
+    actionIdRef.current += 1
+    const id = actionIdRef.current
+    setActiveAction(name)
+    return id
+  }
+  function isStaleAction(id) {
+    return id !== actionIdRef.current
+  }
+  function finishAction(id) {
+    if (!isStaleAction(id)) setActiveAction(null)
+  }
+
+  useEffect(() => {
+    window.speechSynthesis.onvoiceschanged = () => { window.speechSynthesis.getVoices() }
+  }, [])
+
+  // Initialize Web Speech API for AI Assistant feature
+  useEffect(() => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
+    if (SpeechRecognition) {
+      recognitionRef.current = new SpeechRecognition()
+      recognitionRef.current.continuous = false
+      recognitionRef.current.lang = 'en-US'
+      
+      recognitionRef.current.onresult = (event) => {
+        aiPhaseRef.current = 'processing'
+        const text = event.results[0][0].transcript
+        setIsListening(false)
+        handleAiQuery(text)
+      }
+      
+      recognitionRef.current.onerror = (e) => {
+        logToConsole(`[MIC ERROR]: ${e.error}`)
+        setIsListening(false)
+        aiPhaseRef.current = 'idle'
+        audioQueue.isAmbientSuppressed = false
+      }
+      
+      recognitionRef.current.onend = () => {
+        setIsListening(false)
+        // If it was just listening but no text was spoken, release the lock instantly
+        if (aiPhaseRef.current === 'listening') {
+          aiPhaseRef.current = 'idle'
+          audioQueue.isAmbientSuppressed = false
+        }
+      }
+    } else {
+      logToConsole("SpeechRecognition API not supported in this browser.")
+    }
+  }, [])
+
+  useEffect(() => {
+    const handleOrientation = (e) => {
+      const heading = e.webkitCompassHeading || (360 - e.alpha)
+      if (heading !== undefined && heading !== null) setDeviceHeading(Math.round(heading))
+    }
+    window.addEventListener('deviceorientation', handleOrientation)
+    return () => window.removeEventListener('deviceorientation', handleOrientation)
+  }, [])
+
+  useEffect(() => {
+    if (!navigator.geolocation) {
+      logToConsole("ERROR: Native device geolocation tracking missing.")
+      return
+    }
+    const watchId = navigator.geolocation.watchPosition(
+      (pos) => {
+        const coords = { lat: pos.coords.latitude, lon: pos.coords.longitude }
+        setCurrentPosition(coords)
+        if (navRouteDataRef.current && navRouteDataRef.current.checkpoints) {
+          evaluateProactivePathStep(coords)
+        }
+      },
+      (err) => logToConsole(`GPS Hardware Error: ${err.message}`),
+      { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 }
+    )
+    return () => navigator.geolocation.clearWatch(watchId)
+  }, [])
+
+  function evaluateProactivePathStep(userCoords) {
+    const route = navRouteDataRef.current
+    if (!route || !route.checkpoints || route.checkpoints.length === 0) return
+    const nextPt = route.checkpoints[0]
+    const distanceToNext = computeHaversineDistance(userCoords.lat, userCoords.lon, nextPt.lat, nextPt.lon)
+
+    if (distanceToNext <= 12) {
+      const turnAlert = `Navigation update. Approach path shift. ${nextPt.instruction} onto ${nextPt.name}.`
+      audioQueue.speakAmbient(turnAlert, 1.1, voiceEnabledRef)
+      logToConsole(`[AUTO PROACTIVE TRIGGER]: ${turnAlert}`)
+      setNavRouteData((prev) => {
+        if (!prev || !prev.checkpoints) return prev
+        const remaining = prev.checkpoints.slice(1)
+        if (remaining.length === 0) {
+          audioQueue.speakAmbient("Destination reached.", 1.1, voiceEnabledRef)
+          setIsNavigating(false)
+        }
+        return { ...prev, checkpoints: remaining }
+      })
+    }
+  }
+
+  async function handleGuideMeButton() {
+    const id = beginAction('guide')
+    const user = currentPositionRef.current
+    const route = navRouteDataRef.current
+
+    if (!user) {
+      audioQueue.speakExplicit(["GPS tracking not acquired yet."], 1.1, voiceEnabledRef, () => finishAction(id))
+      return
+    }
+    if (!route || !route.checkpoints || route.checkpoints.length === 0) {
+      audioQueue.speakExplicit(["No destination is set."], 1.1, voiceEnabledRef, () => finishAction(id))
+      return
+    }
+
+    const targetNode = route.checkpoints[0]
+    const distanceMeters = computeHaversineDistance(user.lat, user.lon, targetNode.lat, targetNode.lon)
+    const bearing = computeTargetBearing(user.lat, user.lon, targetNode.lat, targetNode.lon)
+    const heading = deviceHeadingRef.current
+    const angleDiff = normalizeAngleDiff(bearing, heading)
+    const turnDirection = computeTurnDirection(angleDiff)
+    const fallbackText = buildFallbackGuidance(targetNode, distanceMeters, turnDirection, angleDiff, route.checkpoints.length)
+
+    try {
+      const res = await fetch(`${BACKEND}/api/briefing`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          objects: objectsRef.current.slice(0, 8).map((o) => ({
+            name: o.name, position: o.position, steps_away: o.steps_away, confidence: o.confidence
+          })),
+          scene_description: aiDescRef.current,
+          navigation: {
+            has_route: true,
+            next_instruction: targetNode.instruction,
+            next_street_name: targetNode.name,
+            distance_to_next_checkpoint_m: distanceMeters,
+            total_distance_remaining_m: route.total_distance_meters,
+            bearing_to_next_deg: bearing,
+            device_heading_deg: heading,
+            turn_direction: turnDirection,
+            turn_degrees: Math.abs(angleDiff),
+            checkpoints_remaining: route.checkpoints.length,
+          }
+        })
+      })
+      const data = await res.json()
+      if (isStaleAction(id)) return 
+
+      if (data.success && data.briefing) {
+        logToConsole(`[GUIDE ME · AI FUSED]: ${data.briefing}`)
+        audioQueue.speakExplicit([data.briefing], 1.1, voiceEnabledRef, () => finishAction(id))
+      } else {
+        audioQueue.speakExplicit([fallbackText], 1.1, voiceEnabledRef, () => finishAction(id))
+      }
+    } catch (err) {
+      if (isStaleAction(id)) return
+      audioQueue.speakExplicit([fallbackText], 1.1, voiceEnabledRef, () => finishAction(id))
+    }
+  }
+
+  function handleObjectButton() {
+    const id = beginAction('object')
+    const description = (aiDescRef.current && aiDescRef.current !== "Initializing environment orientation...")
+      ? aiDescRef.current
+      : "Environment analysis is still initializing."
+    const objectsNarration = buildObjectsNarration(objectsRef.current)
+    audioQueue.speakExplicit([description, objectsNarration], 1.1, voiceEnabledRef, () => finishAction(id))
+  }
+
+  function handleWeatherButton() {
+    const id = beginAction('weather')
+    if (!currentPositionRef.current) {
+      setWeatherReport("Unable to fetch weather: No live GPS tracking.")
+      audioQueue.speakExplicit(["Unable to fetch weather. GPS location is not available."], 1.1, voiceEnabledRef, () => finishAction(id))
+      return
+    }
+    
+    setWeatherReport("Accessing weather data satellites...")
+    ;(async () => {
+      try {
+        const res = await fetch(`${BACKEND}/api/weather?lat=${currentPositionRef.current.lat}&lon=${currentPositionRef.current.lon}`)
+        const data = await res.json()
+        if (isStaleAction(id)) return
+        setWeatherReport(data.report)
+        audioQueue.speakExplicit([data.report], 1.1, voiceEnabledRef, () => finishAction(id))
+      } catch (err) {
+        if (isStaleAction(id)) return
+        setWeatherReport("Unable to pull weather metrics.")
+        audioQueue.speakExplicit(["Unable to pull weather metrics."], 1.1, voiceEnabledRef, () => finishAction(id))
+      }
+    })()
+  }
+
+  function toggleListen() {
+    if (!recognitionRef.current) {
+      logToConsole("Speech recognition not supported in this browser.")
+      return
+    }
+    if (isListening) {
+      recognitionRef.current.stop()
+      setIsListening(false)
+      aiPhaseRef.current = 'idle'
+      audioQueue.isAmbientSuppressed = false
+    } else {
+      actionIdRef.current += 1
+      audioQueue.clearAll()
+      
+      // Lock background noise completely before opening mic channel
+      aiPhaseRef.current = 'listening'
+      audioQueue.isAmbientSuppressed = true 
+      
+      recognitionRef.current.start()
+      setIsListening(true)
+    }
+  }
+
+  async function handleAiQuery(query) {
+    const id = beginAction('ai_assist')
+    logToConsole(`[AI ASSISTANT]: Querying "${query}"...`)
+    try {
+      const res = await fetch(`${BACKEND}/api/ai_assist`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query })
+      })
+      const data = await res.json()
+      if (isStaleAction(id)) return
+      
+      if (data.success && data.response) {
+        audioQueue.speakExplicit([data.response], 1.1, voiceEnabledRef, () => {
+          aiPhaseRef.current = 'idle'
+          audioQueue.isAmbientSuppressed = false // Clear tracking suppression lock when AI finishes speaking
+          finishAction(id)
+        })
+      } else {
+        audioQueue.speakExplicit(["AI Assistant connection error."], 1.1, voiceEnabledRef, () => {
+          aiPhaseRef.current = 'idle'
+          audioQueue.isAmbientSuppressed = false
+          finishAction(id)
+        })
+      }
+    } catch (e) {
+      if (isStaleAction(id)) return
+      audioQueue.speakExplicit(["AI Assistant connection error."], 1.1, voiceEnabledRef, () => {
+        aiPhaseRef.current = 'idle'
+        audioQueue.isAmbientSuppressed = false
+        finishAction(id)
+      })
+    }
+  }
+
+  async function executeRoutingProcess(e) {
+    e.preventDefault()
+    if (!destinationInput.trim()) return
+    logToConsole(`Wiping tracking metrics. Fetching grid for: "${destinationInput}"`)
+    setNavRouteData(null)
+    setIsNavigating(false)
+
+    let startLat = 10.0150, startLon = 76.3280
+    if (currentPosition) { startLat = currentPosition.lat; startLon = currentPosition.lon }
+
+    try {
+      const geoRes = await fetch(`${BACKEND}/api/geocode?query=${encodeURIComponent(destinationInput)}`)
+      const geoData = await geoRes.json()
+      if (!geoData.success) {
+        audioQueue.speakExplicit(["Unable to map target coordinates."], 1.1, voiceEnabledRef)
+        return
+      }
+
+      const routeRes = await fetch(`${BACKEND}/api/route?start_lat=${startLat}&start_lon=${startLon}&end_lat=${geoData.lat}&end_lon=${geoData.lon}`)
+      const routeData = await routeRes.json()
+      if (!routeData.success) { logToConsole(`Routing Denied.`); return }
+
+      setNavRouteData(routeData)
+      setIsNavigating(true)
+      audioQueue.speakExplicit([`New itinerary locked. Distance is ${Math.round(routeData.total_distance_meters)} meters.`], 1.1, voiceEnabledRef)
+    } catch (err) { logToConsole(`Telemetry Exception: ${err.message}`) }
+  }
+
+  useEffect(() => {
+    const wsProto = BACKEND.startsWith('https') ? 'wss' : 'ws'
+    const wsHost = BACKEND.replace(/^https?:/, '')
+    const wsUrl = `${wsProto}:${wsHost}/ws`
+
+    function connect() {
+      const ws = new WebSocket(wsUrl)
+      wsRef.current = ws
+
+      ws.onmessage = (ev) => {
+        if (ws !== wsRef.current) return
+        msgCountRef.current += 1
+        try {
+          const data = JSON.parse(ev.data)
+          if (runningRef.current) {
+            const liveObjects = data.objects || []
+            setObjects(liveObjects)
+            if (data.description && data.description !== aiDescRef.current) { setAiDescription(data.description) }
+            if (voiceEnabledRef.current) {
+              const now = Date.now()
+              liveObjects.forEach((obj) => {
+                const lastSpoken = spokenObjectsCooldownRef.current[obj.name] || 0
+                if (!lastSpoken || (now - lastSpoken > 6000)) {
+                  spokenObjectsCooldownRef.current[obj.name] = now
+                  audioQueue.speakAmbient(`${obj.name}, ${obj.steps_away} steps away on your ${obj.position}.`, 1.15, voiceEnabledRef)
+                }
+              })
+            }
+          } else { setObjects([]) }
+        } catch (e) { console.error(e) }
+      }
+      ws.onerror = (e) => console.error('WS error', e)
+      ws.onclose = () => { setTimeout(connect, 1000) }
+    }
+    connect()
+    const fpsI = setInterval(() => { setFps(msgCountRef.current); msgCountRef.current = 0 }, 1000)
+    return () => { clearInterval(fpsI); if (wsRef.current) wsRef.current.close() }
+  }, [])
+
+  useEffect(() => {
+    if (running && voiceEnabled && aiDescription && aiDescription !== "Initializing environment orientation...") {
+      audioQueue.speakAmbient(aiDescription, 1.1, voiceEnabledRef)
+    }
+  }, [aiDescription, voiceEnabled, running])
+
+  function snapshot() {
+    const img = imgRef.current
+    if (!img) return
+    const canvas = document.createElement('canvas')
+    canvas.width = img.naturalWidth || img.width
+    canvas.height = img.naturalHeight || img.height
+    const ctx = canvas.getContext('2d')
+    if (ctx) {
+      ctx.drawImage(img, 0, 0)
+      const url = canvas.toDataURL('image/png')
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `snapshot-${Date.now()}.png`
+      a.click()
+    }
+  }
+
+  function toggleRunning() {
+    const nextState = !running
+    setRunning(nextState)
+    if (!nextState) audioQueue.clearAll()
+  }
+
+  async function stopCamera() {
+    try { await fetch(`${BACKEND}/camera/stop`, { method: 'POST' }); setRunning(false); audioQueue.clearAll() } catch (err) { console.error(err) }
+  }
+
+  async function startCamera() {
+    try { await fetch(`${BACKEND}/camera/start`, { method: 'POST' }); setRunning(true) } catch (err) { console.error(err) }
+  }
+
+  const activeCheckpoint = navRouteData && navRouteData.checkpoints && navRouteData.checkpoints.length > 0
+    ? navRouteData.checkpoints[0]
+    : null
+
+  function buttonStatusLabel(name) {
+    if (activeAction !== name) return null
+    if (speechState.isPlaying && speechState.priority === 'explicit') return '🔊 Speaking…'
+    return '🧠 Preparing…'
+  }
+
+  const primaryActions = [
+    {
+      id: 'guide',
+      spine: 'Guide',
+      glyph: <IconCompass />,
+      title: 'Guide Me',
+      description: 'Fuses live obstacles with your route, then speaks the next turn, the distance to it, and the path ahead.',
+      idle: 'Turn · Distance · Path',
+      ariaLabel: 'Guide me: get spoken navigation directions',
+      onClick: handleGuideMeButton,
+      disabled: activeAction === 'guide',
+      tint: { '--ub-glow': 'rgba(234,88,12,0.55)', '--ub-soft': 'rgba(234,88,12,0.17)', '--ub-base': '#2a1206', '--ub-status': '#fdba74' },
+    },
+    {
+      id: 'object',
+      spine: 'Objects',
+      glyph: <IconScan />,
+      title: 'Objects',
+      description: 'Reads out the macro scene summary followed by every tracked object, nearest first, with steps and bearing.',
+      idle: 'Environment · Objects',
+      ariaLabel: 'Describe environment and detected objects',
+      onClick: handleObjectButton,
+      disabled: activeAction === 'object',
+      tint: { '--ub-glow': 'rgba(2,132,199,0.55)', '--ub-soft': 'rgba(2,132,199,0.17)', '--ub-base': '#04223a', '--ub-status': '#7dd3fc' },
+    },
+    {
+      id: 'weather',
+      spine: 'Weather',
+      glyph: <IconWeather />,
+      title: 'Weather',
+      description: 'Pulls conditions for your live coordinates and turns them into plain spoken advice — umbrella or not.',
+      idle: 'Conditions · Advice',
+      ariaLabel: 'Get current weather report',
+      onClick: handleWeatherButton,
+      disabled: activeAction === 'weather',
+      tint: { '--ub-glow': 'rgba(16,185,129,0.5)', '--ub-soft': 'rgba(16,185,129,0.15)', '--ub-base': '#04251b', '--ub-status': '#6ee7b7' },
+    },
+    {
+      id: 'ai_assist',
+      spine: isListening ? 'Listening' : 'Assistant',
+      glyph: isListening ? <IconMic /> : <IconSparkle />,
+      title: isListening ? 'Listening…' : 'AI Assistant',
+      description: isListening
+        ? 'Microphone is open and ambient narration is suppressed. Ask your question now.'
+        : 'Ask anything about the scene around you. Tap once to open the microphone, tap again to cancel.',
+      idle: isListening ? 'Speak now' : 'Ask anything',
+      ariaLabel: isListening ? 'Stop listening' : 'AI Assistant: ask questions about the scene',
+      onClick: toggleListen,
+      disabled: false,
+      tint: isListening
+        ? { '--ub-glow': 'rgba(239,68,68,0.6)', '--ub-soft': 'rgba(239,68,68,0.18)', '--ub-base': '#2c0b0f', '--ub-status': '#fca5a5' }
+        : { '--ub-glow': 'rgba(99,102,241,0.55)', '--ub-soft': 'rgba(99,102,241,0.17)', '--ub-base': '#171436', '--ub-status': '#a5b4fc' },
+    },
+  ]
+
+return (
+    <div className="unblinder-app" style={{ minHeight: '100vh', background: '#030712', color: '#f3f4f6', fontFamily: 'sans-serif', padding: '2rem' }}>
+
+      <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem', paddingBottom: '1.5rem', borderBottom: '1px solid #1f2937' }}>
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <span style={{ height: '10px', width: '10px', borderRadius: '50%', background: '#10b981', boxShadow: '0 0 12px #10b981' }} />
+            <h1 style={{ fontSize: '2rem', fontWeight: '800', letterSpacing: '-0.05em', background: 'linear-gradient(to right, #ffffff, #9ca3af)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>UNBLINDER COGNITIVE CONSOLE</h1>
+          </div>
+          <p style={{ color: '#9ca3af', fontSize: '0.95rem', marginTop: '4px' }}>Tactical Core Architecture • Accelerated Spatial Telemetry Frame</p>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: '16px', background: '#111827', padding: '0.75rem 1.5rem', borderRadius: '14px', border: '1px solid #374151' }}>
+          <label className={`ub-speech${voiceEnabled ? ' is-on' : ''}`}>
+            <span className="ub-speech-icon" aria-hidden="true">
+              {voiceEnabled ? <IconVolume /> : <IconVolumeOff />}
+            </span>
+            <span className="ub-speech-text">
+              <span>SPEECH:</span>
+              <span className="ub-swap">
+                <span className={voiceEnabled ? undefined : 'is-hidden'}>ACTIVE</span>
+                <span className={voiceEnabled ? 'is-hidden' : undefined}>MUTED</span>
+              </span>
+            </span>
+            <input
+              type="checkbox"
+              className="ub-switch"
+              checked={voiceEnabled}
+              aria-label="Speech output"
+              onChange={() => {
+                const nextState = !voiceEnabled
+                setVoiceEnabled(nextState)
+                if (!nextState) audioQueue.clearAll()
+              }}
+            />
+          </label>
+
+          <button type="button" className="ub-link-btn" onClick={toggleRunning}>
+            <span className="ub-swap">
+              <span className={running ? undefined : 'is-hidden'}>Pause UI</span>
+              <span className={running ? 'is-hidden' : undefined}>Resume UI</span>
+            </span>
+          </button>
+          <button type="button" className="ub-link-btn" onClick={snapshot}>
+            Snapshot
+          </button>
+          <button
+            type="button"
+            className={`ub-link-btn ${running ? 'is-danger' : 'is-go'}`}
+            onClick={running ? stopCamera : startCamera}
+          >
+            <span className="ub-swap">
+              <span className={running ? undefined : 'is-hidden'}>Stop Camera</span>
+              <span className={running ? 'is-hidden' : undefined}>Start Camera</span>
+            </span>
+          </button>
+          <div style={{ fontSize: '0.85rem', fontFamily: 'monospace', color: '#6b7280' }}>LATENCY: {fps > 0 ? `${Math.round(1000/fps)}ms` : '—'} • FPS: {fps}</div>
+        </div>
+      </header>
+
+      <section aria-label="Primary voice controls" style={{ marginBottom: '2rem' }}>
+        <div className="ub-split">
+          {primaryActions.map((action, i) => {
+            const busy = activeAction === action.id
+            const listening = action.id === 'ai_assist' && isListening
+            const status = buttonStatusLabel(action.id) || action.idle
+            const classes = ['ub-panel']
+            if (busy || listening) classes.push('is-open')
+            if (listening) classes.push('is-listening')
+
+            return (
+              <button
+                key={action.id}
+                type="button"
+                className={classes.join(' ')}
+                style={action.tint}
+                onClick={action.onClick}
+                disabled={action.disabled}
+                aria-busy={busy}
+                aria-label={action.ariaLabel}
+              >
+                <span className="ub-glyph" aria-hidden="true">{action.glyph}</span>
+                <span className="ub-index" aria-hidden="true">{String(i + 1).padStart(2, '0')}</span>
+                <span className="ub-vlabel" aria-hidden="true">{action.spine}</span>
+
+                <span className="ub-content">
+                  <span className="ub-title">{action.title}</span>
+                  <span className="ub-desc">{action.description}</span>
+                  <span className="ub-status">
+                    {busy && <span className="ub-dot" aria-hidden="true" />}
+                    {status}
+                  </span>
+                </span>
+              </button>
+            )
+          })}
+        </div>
+      </section>
+
+      {/* SYSTEM CONTROL HUD */}
+      <section style={{ background: 'linear-gradient(to right, #111827, #0b0f19)', border: '1px solid #1f2937', borderRadius: '18px', padding: '1.5rem', marginBottom: '2rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+        <div style={{ borderBottom: '1px solid #1f2937', paddingBottom: '0.75rem' }}>
+          <h2 style={{ fontSize: '1.25rem', fontWeight: '800', color: '#fff' }}>🎯 ADVANCED COGNITIVE SPATIAL MAPPING</h2>
+          <p style={{ color: '#6b7280', fontSize: '0.85rem', fontFamily: 'monospace' }}>REALTIME LOCATION MONITORING INTERFACE</p>
+        </div>
+
+        <form onSubmit={executeRoutingProcess} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 180px', gap: '1rem', alignItems: 'end' }}>
+          <div>
+            <label style={{ display: 'block', color: '#9ca3af', fontSize: '0.8rem', fontWeight: '700', marginBottom: '6px', fontFamily: 'monospace' }}>START POINT REFERENCE</label>
+            <input type="text" value={startInput} disabled style={{ width: '100%', padding: '0.75rem 1rem', background: '#030712', border: '1px solid #374151', borderRadius: '10px', color: '#6b7280' }} />
+          </div>
+          <div>
+            <label style={{ display: 'block', color: '#9ca3af', fontSize: '0.8rem', fontWeight: '700', marginBottom: '6px', fontFamily: 'monospace' }}>SET NEW TARGET DESTINATION</label>
+            <input type="text" placeholder="Enter location target..." value={destinationInput} onChange={(e) => setDestinationInput(e.target.value)} style={{ width: '100%', padding: '0.75rem 1rem', background: '#1f2937', border: '1px solid #4b5563', borderRadius: '10px', color: '#fff', fontWeight: '600' }} />
+          </div>
+          <button type="submit" style={{ width: '100%', padding: '0.75rem 1rem', background: '#0284c7', color: '#fff', fontWeight: '700', borderRadius: '10px', border: 'none', cursor: 'pointer' }}>🗺️ PLOT MATRIX</button>
+        </form>
+      </section>
+
+      {/* INTERACTIVE LEAFLET MAP SECTION */}
+      <section style={{ background: '#090d16', border: '1px solid #1e293b', borderRadius: '18px', padding: '1.5rem', marginBottom: '2rem' }}>
+        <h3 style={{ fontSize: '1rem', fontFamily: 'monospace', color: '#38bdf8', marginBottom: '1rem', fontWeight: '800' }}>🗺️ HIGH-PRECISION VISUAL POSITIONING VERIFICATION MONITOR</h3>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 300px', gap: '1.5rem' }}>
+          
+          <div style={{ height: '350px', background: '#020617', border: '1px solid #1e293b', borderRadius: '14px', position: 'relative', overflow: 'hidden' }}>
+            {currentPosition ? (
+              <MapContainer 
+                center={[currentPosition.lat, currentPosition.lon]} 
+                zoom={17} 
+                zoomControl={false}
+                style={{ height: '100%', width: '100%', zIndex: 1 }}
+              >
+                <TileLayer
+                  url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
+                  attribution='&copy; <a href="https://carto.com/">CartoDB</a>'
+                />
+                
+                <RecenterMap lat={currentPosition.lat} lng={currentPosition.lon} />
+                
+                <Marker position={[currentPosition.lat, currentPosition.lon]} icon={userIcon} />
+
+                {navRouteData && navRouteData.geometry && (
+                  <Polyline 
+                    positions={navRouteData.geometry.coordinates.map(c => [c[1], c[0]])} 
+                    color="#ea580c" 
+                    weight={6} 
+                    opacity={0.8}
+                    dashArray="10, 12"
+                  />
+                )}
+
+                {activeCheckpoint && (
+                  <Marker position={[activeCheckpoint.lat, activeCheckpoint.lon]} icon={checkpointIcon} />
+                )}
+              </MapContainer>
+            ) : (
+              <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#6b7280', fontSize: '0.9rem', fontFamily: 'monospace' }}>
+                [ AWAITING HIGH PRECISION LOCAL HARDWARE GPS CORRELATION LINK ]
+              </div>
+            )}
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', background: '#111827', padding: '1rem', borderRadius: '14px', border: '1px solid #1f2937', fontFamily: 'monospace', fontSize: '0.85rem' }}>
+            <div style={{ color: '#9ca3af', borderBottom: '1px solid #374151', paddingBottom: '4px', fontWeight: 'bold' }}>LIVE TELEMETRY READOUT</div>
+            <div><span style={{ color: '#6b7280' }}>LAT:</span> {currentPosition ? currentPosition.lat.toFixed(6) : "Searching..."}</div>
+            <div><span style={{ color: '#6b7280' }}>LON:</span> {currentPosition ? currentPosition.lon.toFixed(6) : "Searching..."}</div>
+            <div><span style={{ color: '#6b7280' }}>COMPASS BEARING:</span> {deviceHeading}°</div>
+            {activeCheckpoint && currentPosition && (
+              <>
+                <div><span style={{ color: '#6b7280' }}>TARGET BEARING:</span> {Math.round(computeTargetBearing(currentPosition.lat, currentPosition.lon, activeCheckpoint.lat, activeCheckpoint.lon))}°</div>
+                <div><span style={{ color: '#6b7280' }}>DIST TO NODE:</span> {Math.round(computeHaversineDistance(currentPosition.lat, currentPosition.lon, activeCheckpoint.lat, activeCheckpoint.lon))}m</div>
+              </>
+            )}
+            <div style={{ marginTop: 'auto', paddingTop: '10px', borderTop: '1px solid #374151' }}>
+              <span style={{ color: '#a855f7', fontWeight: 'bold' }}>ROUTE METRIC SCAN:</span><br/>
+              {isNavigating ? "🎯 ROUTE ACTIVE" : "💤 STANDBY ENGINE"}
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <main style={{ display: 'grid', gridTemplateColumns: '1fr 420px', gap: '2rem', alignItems: 'start' }}>
+        <section style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+          <div style={{ position: 'relative', width: '100%', aspectRatio: '16/9', background: '#000000', borderRadius: '18px', overflow: 'hidden', border: '2px solid #1f2937' }}>
+            {running ? (
+              <img ref={imgRef} src={`${BACKEND}/video_feed`} alt="Optical Feed" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+            ) : (
+              <div style={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
+                <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="#4b5563" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ marginBottom: '1rem' }}><path d="M13 13v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h2.5l.5-1"></path><line x1="2" y1="2" x2="22" y2="22"></line><path d="M10 5h4l2 3h4a2 2 0 0 1 2 2v7.5"></path></svg>
+                <h3 style={{ color: '#9ca3af', fontFamily: 'monospace' }}>SENSOR LINK OFFLINE</h3>
+                <button onClick={startCamera} style={{ background: '#10b981', color: '#022c22', fontWeight: '800', padding: '0.8rem 2rem', borderRadius: '12px', border: 'none', cursor: 'pointer', marginTop: '1rem', display: 'flex', alignItems: 'center', gap: '10px' }}><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M5 3v18l15-9L5 3z"/></svg>ENGAGE CAMERA SENSOR</button>
+              </div>
+            )}
+          </div>
+
+          <div style={{ padding: '2rem', background: 'linear-gradient(135deg, #0b0f19, #111827)', borderRadius: '18px', border: '1px solid #1f2937' }}>
+            <div style={{ fontSize: '0.8rem', fontFamily: 'monospace', color: '#10b981', fontWeight: '700', textTransform: 'uppercase', marginBottom: '0.75rem' }}>Macro Scene Summary Context</div>
+            <div style={{ fontSize: '1.75rem', fontWeight: '700', color: '#f9fafb' }}>"{aiDescription}"</div>
+          </div>
+
+          <div style={{ padding: '1.5rem', background: '#020617', border: '2px solid #1e293b', borderRadius: '18px' }}>
+            <div style={{ fontSize: '0.8rem', fontFamily: 'monospace', color: '#38bdf8', fontWeight: '700', marginBottom: '0.75rem', textTransform: 'uppercase' }}>⚙️ ACTIVE TELEMETRY LOG DISPLAY WINDOW</div>
+            <div style={{ height: '140px', overflowY: 'auto', background: '#030712', borderRadius: '10px', padding: '1rem', fontFamily: 'monospace', fontSize: '0.85rem', color: '#4ade80', lineHeight: '1.6', border: '1px solid #1e293b' }}>
+              {debugLogs.map((log, idx) => (
+                <div key={idx} style={{ borderBottom: '1px solid #111827', paddingBottom: '4px', marginBottom: '4px' }}>{log}</div>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+          <aside style={{ background: '#0b0f19', padding: '1.7rem', borderRadius: '18px', border: '1px solid #1f2937' }}>
+            <h2 style={{ fontSize: '1.4rem', fontWeight: '800', borderBottom: '1px solid #1f2937', paddingBottom: '1rem', marginBottom: '1.5rem' }}>YOLO Tracked Targets</h2>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', maxHeight: '250px', overflowY: 'auto' }}>
+               {objects.length === 0 && (
+                <div style={{ color: '#4b5563', textAlign: 'center', padding: '2rem 0', fontFamily: 'monospace' }}>[ NO TARGET OBJECTS REGISTERED ]</div>
+              )}
+              {objects.map((o, i) => (
+                <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '16px', background: '#111827', padding: '1.2rem', borderRadius: '14px', border: '1px solid #374151' }}>
+                  <div style={{ background: '#0284c7', color: '#fff', fontWeight: '800', padding: '10px', borderRadius: '10px', fontFamily: 'monospace' }}>{(o.position || 'ce').slice(0,2).toUpperCase()}</div>
+                  <div>
+                    <div style={{ fontWeight: '700', fontSize: '1.2rem' }}>{o.name}</div>
+                    <div style={{ color: '#f59e0b', fontWeight: '800', fontSize: '0.85rem', marginTop: '4px' }}>{o.steps_away} STEPS AWAY</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </aside>
+
+          <aside style={{ background: '#0b0f19', padding: '1.7rem', borderRadius: '18px', border: '1px solid #1f2937' }}>
+            <div style={{ borderBottom: '1px solid #1f2937', paddingBottom: '1rem', marginBottom: '1.5rem' }}>
+              <h2 style={{ fontSize: '1.4rem', fontWeight: '800' }}>Spatial Weather</h2>
+            </div>
+            <div style={{ background: '#111827', padding: '1.2rem', borderRadius: '14px', border: '1px solid #374151', fontFamily: 'monospace', fontSize: '0.95rem' }}>{weatherReport}</div>
+          </aside>
+        </div>
+      </main>
+    </div>
+  )
+}
